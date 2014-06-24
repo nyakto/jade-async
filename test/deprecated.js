@@ -24,7 +24,7 @@ function deprecate(name, fn, regex) {
     console.warn = consoleWarn;
   });
 }
-describe('deprecated functions', function () {
+xdescribe('deprecated functions', function () {
   deprecate('tag.clone', function () {
     var tag = new jade.nodes.Tag();
     tag.clone();
@@ -62,7 +62,7 @@ describe('deprecated functions', function () {
   }, /The `client` option is deprecated/);
 });
 
-describe('warnings that will become errors', function () {
+xdescribe('warnings that will become errors', function () {
   deprecate('block that is never actually used', function () {
     jade.renderFile(__dirname + '/fixtures/invalid-block-in-extends.jade');
   }, /Warning\: Unexpected block .* on line.*of.*This warning will be an error in v2\.0\.0/);

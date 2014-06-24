@@ -27,7 +27,8 @@ function getFileError(name, options){
 }
 
 
-describe('error reporting', function () {
+// TODO
+xdescribe('error reporting', function () {
   describe('compile time errors', function () {
     describe('with no filename', function () {
       it('includes detail of where the error was thrown', function () {
