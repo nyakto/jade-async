@@ -1,4 +1,4 @@
-!function(e){if("object"==typeof exports)module.exports=e();else if("function"==typeof define&&define.amd)define(e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.jade=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(_dereq_,module,exports){
+!function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.jade=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(_dereq_,module,exports){
 'use strict';
 
 var nodes = _dereq_('./nodes');
@@ -838,7 +838,7 @@ exports.cache = {};
  *
  * @param {String} str
  * @param {Object} options
- * @return {String}
+ * @return {Object}
  * @api private
  */
 
@@ -878,7 +878,7 @@ function parse(str, options){
   globals.push('jade_debug');
   globals.push('buf');
 
-  return ''
+  var body = ''
     + 'var buf = [];\n'
     + 'var jade_mixins = {};\n'
     + 'var jade_interp;\n'
@@ -886,6 +886,7 @@ function parse(str, options){
       ? 'var self = locals || {};\n' + js
       : addWith('locals || {}', '\n' + js, globals)) + ';'
     + 'return buf.join("");';
+  return {body: body, dependencies: parser.dependencies};
 }
 
 /**
@@ -913,27 +914,30 @@ exports.compile = function(str, options){
 
   str = String(str);
 
+  var parsed = parse(str, options);
   if (options.compileDebug !== false) {
     fn = [
         'var jade_debug = [{ lineno: 1, filename: ' + filename + ' }];'
       , 'try {'
-      , parse(str, options)
+      , parsed.body
       , '} catch (err) {'
       , '  jade.rethrow(err, jade_debug[0].filename, jade_debug[0].lineno' + (options.compileDebug === true ? ',' + JSON.stringify(str) : '') + ');'
       , '}'
     ].join('\n');
   } else {
-    fn = parse(str, options);
+    fn = parsed.body;
   }
   fn = new Function('locals, jade', fn)
   var res = function(locals){ return fn(locals, Object.create(runtime)) };
   if (options.client) {
     res.toString = function () {
-      var err = new Error('The `client` option is deprecated, use `jade.compileClient`');
+      var err = new Error('The `client` option is deprecated, use the `jade.compileClient` method instead');
+      err.name = 'Warning';
       console.error(err.stack || err.message);
       return exports.compileClient(str, options);
     };
   }
+  res.dependencies = parsed.dependencies;
   return res;
 };
 
@@ -966,14 +970,14 @@ exports.compileClient = function(str, options){
     fn = [
         'var jade_debug = [{ lineno: 1, filename: ' + filename + ' }];'
       , 'try {'
-      , parse(str, options)
+      , parse(str, options).body
       , '} catch (err) {'
       , '  jade.rethrow(err, jade_debug[0].filename, jade_debug[0].lineno, ' + JSON.stringify(str) + ');'
       , '}'
     ].join('\n');
   } else {
     options.compileDebug = false;
-    fn = parse(str, options);
+    fn = parse(str, options).body;
   }
 
   return 'function template(locals) {\n' + fn + '\n}';
@@ -1280,6 +1284,7 @@ Lexer.prototype = {
       this.consume(captures[0].length);
       var tok = this.tok('comment', captures[2]);
       tok.buffer = '-' != captures[1];
+      this.pipeless = true;
       return tok;
     }
   },
@@ -1329,7 +1334,11 @@ Lexer.prototype = {
    */
 
   filter: function() {
-    return this.scan(/^:([\w\-]+)/, 'filter');
+    var tok = this.scan(/^:([\w\-]+)/, 'filter');
+    if (tok) {
+      this.pipeless = true;
+      return tok;
+    }
   },
 
   /**
@@ -1367,7 +1376,7 @@ Lexer.prototype = {
    * Text.
    */
 
-  text: function() {
+  escaped: function() {
     return this.scan(/^(?:\| ?| )([^\n]+)/, 'text') || this.scan(/^(<[^\n]*)/, 'text');
   },
 
@@ -1385,6 +1394,7 @@ Lexer.prototype = {
    */
 
   dot: function() {
+    this.pipeless = true;
     return this.scan(/^\./, 'dot');
   },
 
@@ -1479,12 +1489,22 @@ Lexer.prototype = {
 
   includeFiltered: function() {
     var captures;
-    if (captures = /^include:([\w\-]+) +([^\n]+)/.exec(this.input)) {
-      this.consume(captures[0].length);
+    if (captures = /^include:([\w\-]+)([\( ])/.exec(this.input)) {
+      this.consume(captures[0].length - 1);
       var filter = captures[1];
-      var path = captures[2];
+      var attrs = captures[2] === '(' ? this.attrs() : null;
+      if (!(captures[2] === ' ' || this.input[0] === ' ')) {
+        throw new Error('expected space after include:filter but got ' + JSON.stringify(this.input[0]));
+      }
+      captures = /^ *([^\n]+)/.exec(this.input);
+      if (!captures) {
+        throw new Error('missing path for include:filter');
+      }
+      this.consume(captures[0].length);
+      var path = captures[1];
       var tok = this.tok('include', path);
       tok.filter = filter;
+      tok.attrs = attrs;
       return tok;
     }
   },
@@ -1855,7 +1875,10 @@ Lexer.prototype = {
       }
 
       // blank line
-      if ('\n' == this.input[0]) return this.tok('newline');
+      if ('\n' == this.input[0]) {
+        this.pipeless = false;
+        return this.tok('newline');
+      }
 
       // outdent
       if (this.indentStack.length && indents < this.indentStack[0]) {
@@ -1873,6 +1896,7 @@ Lexer.prototype = {
         tok = this.tok('newline');
       }
 
+      this.pipeless = false;
       return tok;
     }
   },
@@ -1883,13 +1907,48 @@ Lexer.prototype = {
    */
 
   pipelessText: function() {
-    if (this.pipeless) {
-      if ('\n' == this.input[0]) return;
-      var i = this.input.indexOf('\n');
-      if (-1 == i) i = this.input.length;
-      var str = this.input.substr(0, i);
-      this.consume(str.length);
-      return this.tok('text', str);
+    if (!this.pipeless) return;
+    var captures, re;
+
+    // established regexp
+    if (this.indentRe) {
+      captures = this.indentRe.exec(this.input);
+    // determine regexp
+    } else {
+      // tabs
+      re = /^\n(\t*) */;
+      captures = re.exec(this.input);
+
+      // spaces
+      if (captures && !captures[1].length) {
+        re = /^\n( *)/;
+        captures = re.exec(this.input);
+      }
+
+      // established
+      if (captures && captures[1].length) this.indentRe = re;
+    }
+
+    var indents = captures && captures[1].length;
+    if (indents && (this.indentStack.length === 0 || indents > this.indentStack[0])) {
+      var indent = captures[1];
+      var line;
+      var tokens = [];
+      var isMatch;
+      do {
+        // text has `\n` as a prefix
+        var i = this.input.substr(1).indexOf('\n');
+        if (-1 == i) i = this.input.length - 1;
+        var str = this.input.substr(1, i);
+        isMatch = str.substr(0, indent.length) === indent || !str.trim();
+        if (isMatch) {
+          // consume test along with `\n` prefix if match
+          this.consume(str.length + 1);
+          tokens.push(str.substr(indent.length));
+        }
+      } while(this.input.length && isMatch);
+      while (this.input.length === 0 && tokens[tokens.length - 1] === '') tokens.pop();
+      return this.tok('pipeless-text', tokens);
     }
   },
 
@@ -1960,7 +2019,7 @@ Lexer.prototype = {
       || this.attrs()
       || this.attributesBlock()
       || this.indent()
-      || this.text()
+      || this.escaped()
       || this.comment()
       || this.colon()
       || this.dot()
@@ -2620,6 +2679,7 @@ var Parser = exports = module.exports = function Parser(str, filename, options){
   this.options = options;
   this.contexts = [this];
   this.inMixin = false;
+  this.dependencies = [];
 };
 
 /**
@@ -2727,6 +2787,27 @@ Parser.prototype = {
       return ast;
     }
 
+    if (!this.extending && !this.included && Object.keys(this.blocks).length){
+      var blocks = [];
+      utils.walkAST(block, function (node) {
+        if (node.type === 'Block' && node.name) {
+          blocks.push(node.name);
+        }
+      });
+      Object.keys(this.blocks).forEach(function (name) {
+        if (blocks.indexOf(name) === -1) {
+          console.warn('Warning: Unexpected block "'
+                       + name
+                       + '" '
+                       + ' on line '
+                       + this.blocks[name].line
+                       + ' of '
+                       + (this.blocks[name].filename)
+                       + '. This block is never used. This warning will be an error in v2.0.0');
+        }
+      }.bind(this));
+    }
+
     return block;
   },
 
@@ -2828,7 +2909,7 @@ Parser.prototype = {
 
   parseText: function(){
     var tok = this.expect('text');
-    var tokens = this.parseTextWithInlineTags(tok.val);
+    var tokens = this.parseInlineTagsInText(tok.val);
     if (tokens.length === 1) return tokens[0];
     var node = new nodes.Block;
     for (var i = 0; i < tokens.length; i++) {
@@ -2952,10 +3033,9 @@ Parser.prototype = {
     var tok = this.expect('comment');
     var node;
 
-    if ('indent' == this.peek().type) {
-      this.lexer.pipeless = true;
-      node = new nodes.BlockComment(tok.val, this.parseTextBlock(), tok.buffer);
-      this.lexer.pipeless = false;
+    var block;
+    if (block = this.parseTextBlock()) {
+      node = new nodes.BlockComment(tok.val, block, tok.buffer);
     } else {
       node = new nodes.Comment(tok.val, tok.buffer);
     }
@@ -2984,13 +3064,7 @@ Parser.prototype = {
     var attrs = this.accept('attrs');
     var block;
 
-    if ('indent' == this.peek().type) {
-      this.lexer.pipeless = true;
-      block = this.parseTextBlock();
-      this.lexer.pipeless = false;
-    } else {
-      block = new nodes.Block;
-    }
+    block = this.parseTextBlock() || new nodes.Block();
 
     var options = {};
     if (attrs) {
@@ -3059,8 +3133,10 @@ Parser.prototype = {
     var path = this.resolvePath(this.expect('extends').val.trim(), 'extends');
     if ('.jade' != path.substr(-5)) path += '.jade';
 
+    this.dependencies.push(path);
     var str = fs.readFileSync(path, 'utf8');
     var parser = new this.constructor(str, path, this.options);
+    parser.dependencies = this.dependencies;
 
     parser.blocks = this.blocks;
     parser.contexts = this.contexts;
@@ -3082,6 +3158,7 @@ Parser.prototype = {
     block = 'indent' == this.peek().type
       ? this.block()
       : new nodes.Block(new nodes.Literal(''));
+    block.name = name;
 
     var prev = this.blocks[name] || {prepended: [], appended: []}
     if (prev.mode === 'replace') return this.blocks[name] = prev;
@@ -3126,11 +3203,17 @@ Parser.prototype = {
     var tok = this.expect('include');
 
     var path = this.resolvePath(tok.val.trim(), 'include');
-
+    this.dependencies.push(path);
     // has-filter
     if (tok.filter) {
       var str = fs.readFileSync(path, 'utf8').replace(/\r/g, '');
-      str = filters(tok.filter, str, { filename: path });
+      var options = {filename: path};
+      if (tok.attrs) {
+        tok.attrs.attrs.forEach(function (attribute) {
+          options[attribute.name] = constantinople.toConstant(attribute.val);
+        });
+      }
+      str = filters(tok.filter, str, options);
       return new nodes.Literal(str);
     }
 
@@ -3142,7 +3225,10 @@ Parser.prototype = {
 
     var str = fs.readFileSync(path, 'utf8');
     var parser = new this.constructor(str, path, this.options);
+    parser.dependencies = this.dependencies;
+
     parser.blocks = utils.merge({}, this.blocks);
+    parser.included = true;
 
     parser.mixins = this.mixins;
 
@@ -3200,7 +3286,7 @@ Parser.prototype = {
     }
   },
 
-  parseTextWithInlineTags: function (str) {
+  parseInlineTagsInText: function (str) {
     var line = this.line();
 
     var match = /(\\)?#\[((?:.|\n)*)$/.exec(str);
@@ -3208,7 +3294,7 @@ Parser.prototype = {
       if (match[1]) { // escape
         var text = new nodes.Text(str.substr(0, match.index) + '#[');
         text.line = line;
-        var rest = this.parseTextWithInlineTags(match[2]);
+        var rest = this.parseInlineTagsInText(match[2]);
         if (rest[0].type === 'Text') {
           text.val += rest[0].val;
           rest.shift();
@@ -3222,7 +3308,7 @@ Parser.prototype = {
         var range = parseJSExpression(rest);
         var inner = new Parser(range.src, this.filename, this.options);
         buffer.push(inner.parse());
-        return buffer.concat(this.parseTextWithInlineTags(rest.substr(range.end + 1)));
+        return buffer.concat(this.parseInlineTagsInText(rest.substr(range.end + 1)));
       }
     } else {
       var text = new nodes.Text(str);
@@ -3238,30 +3324,12 @@ Parser.prototype = {
   parseTextBlock: function(){
     var block = new nodes.Block;
     block.line = this.line();
-    var spaces = this.expect('indent').val;
-    if (null == this._spaces) this._spaces = spaces;
-    var indent = Array(spaces - this._spaces + 1).join(' ');
-    while ('outdent' != this.peek().type) {
-      switch (this.peek().type) {
-        case 'newline':
-          this.advance();
-          break;
-        case 'indent':
-          this.parseTextBlock(true).nodes.forEach(function(node){
-            block.push(node);
-          });
-          break;
-        default:
-          var texts = this.parseTextWithInlineTags(indent + this.advance().val);
-          texts.forEach(function (text) {
-            block.push(text);
-          });
-      }
-    }
-
-    if (spaces == this._spaces) this._spaces = null;
-    this.expect('outdent');
-
+    var body = this.peek();
+    if (body.type !== 'pipeless-text') return;
+    this.advance();
+    block.nodes = body.val.reduce(function (accumulator, text) {
+      return accumulator.concat(this.parseInlineTagsInText(text));
+    }.bind(this), []);
     return block;
   },
 
@@ -3374,6 +3442,7 @@ Parser.prototype = {
       case 'indent':
       case 'outdent':
       case 'eos':
+      case 'pipeless-text':
         break;
       default:
         throw new Error('Unexpected token `' + this.peek().type + '` expected `text`, `code`, `:`, `newline` or `eos`')
@@ -3383,16 +3452,12 @@ Parser.prototype = {
     while ('newline' == this.peek().type) this.advance();
 
     // block?
-    if ('indent' == this.peek().type) {
-      if (tag.textOnly) {
-        this.lexer.pipeless = true;
-        tag.block = this.parseTextBlock();
-        this.lexer.pipeless = false;
-      } else {
-        var block = this.block();
-        for (var i = 0, len = block.nodes.length; i < len; ++i) {
-          tag.block.push(block.nodes[i]);
-        }
+    if (tag.textOnly) {
+      tag.block = this.parseTextBlock();
+    } else if ('indent' == this.peek().type) {
+      var block = this.block();
+      for (var i = 0, len = block.nodes.length; i < len; ++i) {
+        tag.block.push(block.nodes[i]);
       }
     }
 
@@ -3400,7 +3465,7 @@ Parser.prototype = {
   }
 };
 
-},{"./filters":3,"./lexer":6,"./nodes":16,"./utils":26,"character-parser":33,"constantinople":34,"fs":27,"path":30}],24:[function(_dereq_,module,exports){
+},{"./filters":3,"./lexer":6,"./nodes":16,"./utils":26,"character-parser":33,"constantinople":34,"fs":27,"path":29}],24:[function(_dereq_,module,exports){
 'use strict';
 
 /**
@@ -3580,7 +3645,7 @@ exports.rethrow = function rethrow(err, filename, lineno, str){
     throw err;
   }
   try {
-    str =  str || _dereq_('fs').readFileSync(filename, 'utf8')
+    str = str || _dereq_('fs').readFileSync(filename, 'utf8')
   } catch (ex) {
     rethrow(err, null, lineno)
   }
@@ -3646,7 +3711,37 @@ exports.merge = function(a, b) {
   return a;
 };
 
-
+exports.walkAST = function walkAST(ast, before, after) {
+  before && before(ast);
+  switch (ast.type) {
+    case 'Block':
+      ast.nodes.forEach(function (node) {
+        walkAST(node, before, after);
+      });
+      break;
+    case 'Case':
+    case 'Each':
+    case 'Mixin':
+    case 'Tag':
+    case 'When':
+      ast.block && walkAST(ast.block, before, after);
+      break;
+    case 'Attrs':
+    case 'BlockComment':
+    case 'Code':
+    case 'Comment':
+    case 'Doctype':
+    case 'Filter':
+    case 'Literal':
+    case 'MixinBlock':
+    case 'Text':
+      break;
+    default:
+      throw new Error('Unexpected node type ' + ast.type);
+      break;
+  }
+  after && after(ast);
+};
 },{}],27:[function(_dereq_,module,exports){
 
 },{}],28:[function(_dereq_,module,exports){
@@ -3675,61 +3770,6 @@ if (typeof Object.create === 'function') {
 }
 
 },{}],29:[function(_dereq_,module,exports){
-// shim for using process in browser
-
-var process = module.exports = {};
-
-process.nextTick = (function () {
-    var canSetImmediate = typeof window !== 'undefined'
-    && window.setImmediate;
-    var canPost = typeof window !== 'undefined'
-    && window.postMessage && window.addEventListener
-    ;
-
-    if (canSetImmediate) {
-        return function (f) { return window.setImmediate(f) };
-    }
-
-    if (canPost) {
-        var queue = [];
-        window.addEventListener('message', function (ev) {
-            var source = ev.source;
-            if ((source === window || source === null) && ev.data === 'process-tick') {
-                ev.stopPropagation();
-                if (queue.length > 0) {
-                    var fn = queue.shift();
-                    fn();
-                }
-            }
-        }, true);
-
-        return function nextTick(fn) {
-            queue.push(fn);
-            window.postMessage('process-tick', '*');
-        };
-    }
-
-    return function nextTick(fn) {
-        setTimeout(fn, 0);
-    };
-})();
-
-process.title = 'browser';
-process.browser = true;
-process.env = {};
-process.argv = [];
-
-process.binding = function (name) {
-    throw new Error('process.binding is not supported');
-}
-
-// TODO(shtylman)
-process.cwd = function () { return '/' };
-process.chdir = function (dir) {
-    throw new Error('process.chdir is not supported');
-};
-
-},{}],30:[function(_dereq_,module,exports){
 (function (process){
 // Copyright Joyent, Inc. and other Node contributors.
 //
@@ -3956,8 +3996,73 @@ var substr = 'ab'.substr(-1) === 'b'
     }
 ;
 
-}).call(this,_dereq_("/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"))
-},{"/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":29}],31:[function(_dereq_,module,exports){
+}).call(this,_dereq_("FWaASH"))
+},{"FWaASH":30}],30:[function(_dereq_,module,exports){
+// shim for using process in browser
+
+var process = module.exports = {};
+
+process.nextTick = (function () {
+    var canSetImmediate = typeof window !== 'undefined'
+    && window.setImmediate;
+    var canPost = typeof window !== 'undefined'
+    && window.postMessage && window.addEventListener
+    ;
+
+    if (canSetImmediate) {
+        return function (f) { return window.setImmediate(f) };
+    }
+
+    if (canPost) {
+        var queue = [];
+        window.addEventListener('message', function (ev) {
+            var source = ev.source;
+            if ((source === window || source === null) && ev.data === 'process-tick') {
+                ev.stopPropagation();
+                if (queue.length > 0) {
+                    var fn = queue.shift();
+                    fn();
+                }
+            }
+        }, true);
+
+        return function nextTick(fn) {
+            queue.push(fn);
+            window.postMessage('process-tick', '*');
+        };
+    }
+
+    return function nextTick(fn) {
+        setTimeout(fn, 0);
+    };
+})();
+
+process.title = 'browser';
+process.browser = true;
+process.env = {};
+process.argv = [];
+
+function noop() {}
+
+process.on = noop;
+process.addListener = noop;
+process.once = noop;
+process.off = noop;
+process.removeListener = noop;
+process.removeAllListeners = noop;
+process.emit = noop;
+
+process.binding = function (name) {
+    throw new Error('process.binding is not supported');
+}
+
+// TODO(shtylman)
+process.cwd = function () { return '/' };
+process.chdir = function (dir) {
+    throw new Error('process.chdir is not supported');
+};
+
+},{}],31:[function(_dereq_,module,exports){
 module.exports = function isBuffer(arg) {
   return arg && typeof arg === 'object'
     && typeof arg.copy === 'function'
@@ -4553,8 +4658,8 @@ function hasOwnProperty(obj, prop) {
   return Object.prototype.hasOwnProperty.call(obj, prop);
 }
 
-}).call(this,_dereq_("/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"),typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"./support/isBuffer":31,"/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":29,"inherits":28}],33:[function(_dereq_,module,exports){
+}).call(this,_dereq_("FWaASH"),typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
+},{"./support/isBuffer":31,"FWaASH":30,"inherits":28}],33:[function(_dereq_,module,exports){
 exports = (module.exports = parse);
 exports.parse = parse;
 function parse(src, state, options) {
@@ -5908,6 +6013,9 @@ define(function (_dereq_, exports, module) {
       aSourceMapConsumer.sources.forEach(function (sourceFile) {
         var content = aSourceMapConsumer.sourceContentFor(sourceFile);
         if (content) {
+          if (aSourceMapPath) {
+            sourceFile = util.join(aSourceMapPath, sourceFile);
+          }
           if (sourceRoot) {
             sourceFile = util.relative(sourceRoot, sourceFile);
           }
@@ -6090,6 +6198,13 @@ define(function (_dereq_, exports, module) {
   var SourceMapGenerator = _dereq_('./source-map-generator').SourceMapGenerator;
   var util = _dereq_('./util');
 
+  // Matches a Windows-style `\r\n` newline or a `\n` newline used by all other
+  // operating systems these days (capturing the result).
+  var REGEX_NEWLINE = /(\r?\n)/g;
+
+  // Matches a Windows-style newline, or any character.
+  var REGEX_CHARACTER = /\r\n|[\s\S]/g;
+
   /**
    * SourceNodes provide a way to abstract over interpolating/concatenating
    * snippets of generated JavaScript source code while maintaining the line and
@@ -6124,9 +6239,17 @@ define(function (_dereq_, exports, module) {
       // and the SourceMap
       var node = new SourceNode();
 
-      // The generated code
-      // Processed fragments are removed from this array.
-      var remainingLines = aGeneratedCode.split('\n');
+      // All even indices of this array are one line of the generated code,
+      // while all odd indices are the newlines between two adjacent lines
+      // (since `REGEX_NEWLINE` captures its match).
+      // Processed fragments are removed from this array, by calling `shiftNextLine`.
+      var remainingLines = aGeneratedCode.split(REGEX_NEWLINE);
+      var shiftNextLine = function() {
+        var lineContents = remainingLines.shift();
+        // The last line of a file might not have a newline.
+        var newLine = remainingLines.shift() || "";
+        return lineContents + newLine;
+      };
 
       // We need to remember the position of "remainingLines"
       var lastGeneratedLine = 1, lastGeneratedColumn = 0;
@@ -6143,7 +6266,7 @@ define(function (_dereq_, exports, module) {
           if (lastGeneratedLine < mapping.generatedLine) {
             var code = "";
             // Associate first line with "lastMapping"
-            addMappingWithCode(lastMapping, remainingLines.shift() + "\n");
+            addMappingWithCode(lastMapping, shiftNextLine());
             lastGeneratedLine++;
             lastGeneratedColumn = 0;
             // The remaining code is added without mapping
@@ -6167,7 +6290,7 @@ define(function (_dereq_, exports, module) {
         // to the SourceNode without any mapping.
         // Each line is added as separate string.
         while (lastGeneratedLine < mapping.generatedLine) {
-          node.add(remainingLines.shift() + "\n");
+          node.add(shiftNextLine());
           lastGeneratedLine++;
         }
         if (lastGeneratedColumn < mapping.generatedColumn) {
@@ -6182,12 +6305,10 @@ define(function (_dereq_, exports, module) {
       if (remainingLines.length > 0) {
         if (lastMapping) {
           // Associate the remaining code in the current line with "lastMapping"
-          var lastLine = remainingLines.shift();
-          if (remainingLines.length > 0) lastLine += "\n";
-          addMappingWithCode(lastMapping, lastLine);
+          addMappingWithCode(lastMapping, shiftNextLine());
         }
         // and add the remaining lines without any mapping
-        node.add(remainingLines.join("\n"));
+        node.add(remainingLines.join(""));
       }
 
       // Copy sourcesContent into SourceNode
@@ -6426,8 +6547,8 @@ define(function (_dereq_, exports, module) {
         lastOriginalSource = null;
         sourceMappingActive = false;
       }
-      chunk.split('').forEach(function (ch, idx, array) {
-        if (ch === '\n') {
+      chunk.match(REGEX_CHARACTER).forEach(function (ch, idx, array) {
+        if (REGEX_NEWLINE.test(ch)) {
           generated.line++;
           generated.column = 0;
           // Mappings end at eol
@@ -6449,7 +6570,7 @@ define(function (_dereq_, exports, module) {
             });
           }
         } else {
-          generated.column++;
+          generated.column += ch.length;
         }
       });
     });
@@ -7070,8 +7191,8 @@ function amdefine(module, requireFn) {
 
 module.exports = amdefine;
 
-}).call(this,_dereq_("/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js"),"/../node_modules/uglify-js/node_modules/source-map/node_modules/amdefine/amdefine.js")
-},{"/Users/forbeslindesay/GitHub/jade/node_modules/browserify/node_modules/insert-module-globals/node_modules/process/browser.js":29,"path":30}],45:[function(_dereq_,module,exports){
+}).call(this,_dereq_("FWaASH"),"/../node_modules/uglify-js/node_modules/source-map/node_modules/amdefine/amdefine.js")
+},{"FWaASH":30,"path":29}],45:[function(_dereq_,module,exports){
 var sys = _dereq_("util");
 var MOZ_SourceMap = _dereq_("source-map");
 var UglifyJS = exports;
@@ -7675,10 +7796,10 @@ var AST_Toplevel = DEFNODE("Toplevel", "globals", {
         var parameters = [];
 
         arg_parameter_pairs.forEach(function(pair) {
-            var split = pair.split(":");
+            var splitAt = pair.lastIndexOf(":");
 
-            args.push(split[0]);
-            parameters.push(split[1]);
+            args.push(pair.substr(0, splitAt));
+            parameters.push(pair.substr(splitAt + 1));
         });
 
         var wrapped_tl = "(function(" + parameters.join(",") + "){ '$ORIG'; })(" + args.join(",") + ")";
@@ -8533,14 +8654,7 @@ function is_identifier_char(ch) {
 };
 
 function is_identifier_string(str){
-    var i = str.length;
-    if (i == 0) return false;
-    if (!is_identifier_start(str.charCodeAt(0))) return false;
-    while (--i >= 0) {
-        if (!is_identifier_char(str.charAt(i)))
-            return false;
-    }
-    return true;
+    return /^[a-z_$][a-z0-9_$]*$/i.test(str);
 };
 
 function parse_js_number(num) {
@@ -8578,7 +8692,7 @@ var EX_EOF = {};
 function tokenizer($TEXT, filename, html5_comments) {
 
     var S = {
-        text            : $TEXT.replace(/\r\n?|[\n\u2028\u2029]/g, "\n").replace(/\uFEFF/g, ''),
+        escaped            : $TEXT.replace(/\r\n?|[\n\u2028\u2029]/g, "\n").replace(/\uFEFF/g, ''),
         filename        : filename,
         pos             : 0,
         tokpos          : 0,
@@ -8591,10 +8705,10 @@ function tokenizer($TEXT, filename, html5_comments) {
         comments_before : []
     };
 
-    function peek() { return S.text.charAt(S.pos); };
+    function peek() { return S.escaped.charAt(S.pos); };
 
     function next(signal_eof, in_string) {
-        var ch = S.text.charAt(S.pos++);
+        var ch = S.escaped.charAt(S.pos++);
         if (signal_eof && !ch)
             throw EX_EOF;
         if (ch == "\n") {
@@ -8612,11 +8726,11 @@ function tokenizer($TEXT, filename, html5_comments) {
     };
 
     function looking_at(str) {
-        return S.text.substr(S.pos, str.length) == str;
+        return S.escaped.substr(S.pos, str.length) == str;
     };
 
     function find(what, signal_eof) {
-        var pos = S.text.indexOf(what, S.pos);
+        var pos = S.escaped.indexOf(what, S.pos);
         if (signal_eof && pos == -1) throw EX_EOF;
         return pos;
     };
@@ -8758,10 +8872,10 @@ function tokenizer($TEXT, filename, html5_comments) {
         var regex_allowed = S.regex_allowed;
         var i = find("\n"), ret;
         if (i == -1) {
-            ret = S.text.substr(S.pos);
-            S.pos = S.text.length;
+            ret = S.escaped.substr(S.pos);
+            S.pos = S.escaped.length;
         } else {
-            ret = S.text.substring(S.pos, i);
+            ret = S.escaped.substring(S.pos, i);
             S.pos = i;
         }
         S.comments_before.push(token(type, ret, true));
@@ -8772,7 +8886,7 @@ function tokenizer($TEXT, filename, html5_comments) {
     var skip_multiline_comment = with_eof_error("Unterminated multiline comment", function(){
         var regex_allowed = S.regex_allowed;
         var i = find("*/", true);
-        var text = S.text.substring(S.pos, i);
+        var text = S.escaped.substring(S.pos, i);
         var a = text.split("\n"), n = a.length;
         // update stream position
         S.pos = i + 2;
@@ -11606,8 +11720,12 @@ function OutputStream(options) {
     DEFPRINT(AST_UnaryPrefix, function(self, output){
         var op = self.operator;
         output.print(op);
-        if (/^[a-z]/i.test(op))
+        if (/^[a-z]/i.test(op)
+            || (/[+-]$/.test(op)
+                && self.expression instanceof AST_UnaryPrefix
+                && /^[+-]/.test(self.expression.operator))) {
             output.space();
+        }
         self.expression.print(output);
     });
     DEFPRINT(AST_UnaryPostfix, function(self, output){
@@ -14425,7 +14543,7 @@ function SourceMap(options) {
                 start    : my_start_token(M),
                 end      : my_end_token(M),
                 body     : from_moz(M.block).body,
-                bcatch   : from_moz(M.handlers[0]),
+                bcatch   : from_moz(M.handlers ? M.handlers[0] : M.handler),
                 bfinally : M.finalizer ? new AST_Finally(from_moz(M.finalizer)) : null
             });
         },
@@ -14865,7 +14983,7 @@ exports.minify = function (files, options) {
         if (options.sourceMapIncludeSources) {
             for (var file in sourcesContent) {
                 if (sourcesContent.hasOwnProperty(file)) {
-                    options.source_map.get().setSourceContent(file, sourcesContent[file]);
+                    output.source_map.get().setSourceContent(file, sourcesContent[file]);
                 }
             }
         }
@@ -14876,6 +14994,11 @@ exports.minify = function (files, options) {
     }
     var stream = UglifyJS.OutputStream(output);
     toplevel.print(stream);
+
+    if(options.outSourceMap){
+        stream += "\n//# sourceMappingURL=" + options.outSourceMap;
+    }
+
     return {
         code : stream + "",
         map  : output.source_map + ""
