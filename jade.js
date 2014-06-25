@@ -1,709 +1,656 @@
 !function(e){if("object"==typeof exports&&"undefined"!=typeof module)module.exports=e();else if("function"==typeof define&&define.amd)define([],e);else{var f;"undefined"!=typeof window?f=window:"undefined"!=typeof global?f=global:"undefined"!=typeof self&&(f=self),f.jade=e()}}(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);throw new Error("Cannot find module '"+o+"'")}var f=n[o]={exports:{}};t[o][0].call(f.exports,function(e){var n=t[o][1][e];return s(n?n:e)},f,f.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(_dereq_,module,exports){
-'use strict';
-
-var nodes = _dereq_('./nodes');
+var runtime = _dereq_('./runtime');
 var filters = _dereq_('./filters');
 var doctypes = _dereq_('./doctypes');
-var runtime = _dereq_('./runtime');
-var utils = _dereq_('./utils');
 var selfClosing = _dereq_('./self-closing');
+var addWith = _dereq_('with');
 var parseJSExpression = _dereq_('character-parser').parseMax;
 var constantinople = _dereq_('constantinople');
 
 function isConstant(src) {
-  return constantinople(src, {jade: runtime, 'jade_interp': undefined});
+    return constantinople(src, {
+        jade: runtime
+    });
 }
+
 function toConstant(src) {
-  return constantinople.toConstant(src, {jade: runtime, 'jade_interp': undefined});
-}
-function errorAtNode(node, error) {
-  error.line = node.line;
-  error.filename = node.filename;
-  return error;
+    return constantinople.toConstant(
+        src,
+        {
+            jade: runtime
+        }
+    );
 }
 
-/**
- * Initialize `Compiler` with the given `node`.
- *
- * @param {Node} node
- * @param {Object} options
- * @api public
- */
+function DefaultPromiseProvider(name) {
+    this.name = name;
+}
 
-var Compiler = module.exports = function Compiler(node, options) {
-  this.options = options = options || {};
-  this.node = node;
-  this.hasCompiledDoctype = false;
-  this.hasCompiledTag = false;
-  this.pp = options.pretty || false;
-  this.debug = false !== options.compileDebug;
-  this.indents = 0;
-  this.parentIndents = 0;
-  this.terse = false;
-  this.mixins = {};
-  this.dynamicMixins = false;
-  if (options.doctype) this.setDoctype(options.doctype);
+DefaultPromiseProvider.prototype.fulfill = function (value) {
+    return this.name + '.fulfill(' + value + ')';
 };
 
-/**
- * Compiler prototype.
- */
+DefaultPromiseProvider.prototype.promise = function (value) {
+    return this.name + '.promise(' + value + ')';
+};
 
-Compiler.prototype = {
+DefaultPromiseProvider.prototype.all = function (value) {
+    return this.name + '.all(' + value + ')';
+};
 
-  /**
-   * Compile parse tree to JavaScript.
-   *
-   * @api public
-   */
+function Block(compiler, name, params, parent) {
+    this.compiler = compiler;
+    this.name = name;
+    this.params = params;
+    this.indentSize = parent ? parent.indentSize : 0;
+    this.clear();
+}
 
-  compile: function(){
-    this.buf = [];
-    if (this.pp) this.buf.push("var jade_indent = [];");
-    this.lastBufferedIdx = -1;
-    this.visit(this.node);
-    if (!this.dynamicMixins) {
-      // if there are no dynamic mixins we can remove any un-used mixins
-      var mixinNames = Object.keys(this.mixins);
-      for (var i = 0; i < mixinNames.length; i++) {
-        var mixin = this.mixins[mixinNames[i]];
-        if (!mixin.used) {
-          for (var x = 0; x < mixin.instances.length; x++) {
-            for (var y = mixin.instances[x].start; y < mixin.instances[x].end; y++) {
-              this.buf[y] = '';
-            }
-          }
-        }
-      }
-    }
-    return this.buf.join('\n');
-  },
+Block.prototype.clear = function () {
+    this.simple = true;
+    this.header = false;
+    this.buff = '';
+    this.data = [];
+    this.body = '';
+};
 
-  /**
-   * Sets the default doctype `name`. Sets terse mode to `true` when
-   * html 5 is used, causing self-closing tags to end with ">" vs "/>",
-   * and boolean attributes are not mirrored.
-   *
-   * @param {string} name
-   * @api public
-   */
-
-  setDoctype: function(name){
-    this.doctype = doctypes[name.toLowerCase()] || '<!DOCTYPE ' + name + '>';
-    this.terse = this.doctype.toLowerCase() == '<!doctype html>';
-    this.xml = 0 == this.doctype.indexOf('<?xml');
-  },
-
-  /**
-   * Buffer the given `str` exactly as is or with interpolation
-   *
-   * @param {String} str
-   * @param {Boolean} interpolate
-   * @api public
-   */
-
-  buffer: function (str, interpolate) {
-    var self = this;
+Block.prototype.raw = function (str, interpolate) {
     if (interpolate) {
-      var match = /(\\)?([#!]){((?:.|\n)*)$/.exec(str);
-      if (match) {
-        this.buffer(str.substr(0, match.index), false);
-        if (match[1]) { // escape
-          this.buffer(match[2] + '{', false);
-          this.buffer(match[3], true);
-          return;
-        } else {
-          var rest = match[3];
-          var range = parseJSExpression(rest);
-          var code = ('!' == match[2] ? '' : 'jade.escape') + "((jade_interp = " + range.src + ") == null ? '' : jade_interp)";
-          this.bufferExpression(code);
-          this.buffer(rest.substr(range.end + 1), true);
-          return;
+        var match = /(\\)?([#!]){((?:.|\n)*)$/.exec(str);
+        if (match) {
+            this.raw(str.substr(0, match.index), false);
+            if (match[1]) {
+                this.raw(match[2] + '{', false);
+                this.raw(match[3], true);
+            } else {
+                var rest = match[3];
+                var range = parseJSExpression(rest);
+                this.expression(range.src, '!' !== match[2]);
+                this.raw(rest.substr(range.end + 1), true);
+            }
+            return;
         }
-      }
     }
 
-    str = JSON.stringify(str);
-    str = str.substr(1, str.length - 2);
+    this.buff += str;
+};
 
-    if (this.lastBufferedIdx == this.buf.length) {
-      if (this.lastBufferedType === 'code') this.lastBuffered += ' + "';
-      this.lastBufferedType = 'text';
-      this.lastBuffered += str;
-      this.buf[this.lastBufferedIdx - 1] = 'buf.push(' + this.bufferStartChar + this.lastBuffered + '");'
+Block.prototype.flush = function (renderData) {
+    if (this.buff.length > 0) {
+        this.data.push(
+            this.compiler.promiseProvider.fulfill(
+                JSON.stringify(this.buff)
+            )
+        );
+        this.buff = '';
+    }
+    if (renderData) {
+        if (this.simple) {
+            this.body = 'return [' + this.data.join(', ') + '];';
+        } else {
+            if (this.header) {
+                if (this.data.length > 0) {
+                    this.body += 'buff.push(' + this.data.join(', ') + ');';
+                }
+            } else {
+                this.header = true;
+                this.body = 'var buff = [' + this.data.join(', ') + '];';
+            }
+        }
+        this.data = [];
+    }
+};
+
+Block.prototype.indent = function (size, write, newLine) {
+    this.indentSize += size;
+    if (write) {
+        if (newLine) {
+            this.raw('\n');
+        }
+        this.raw(new Array(this.indentSize + 1).join("  "));
+    }
+};
+
+Block.prototype.finish = function () {
+    this.flush(true);
+    if (!this.simple) {
+        this.body += 'return buff;';
+    }
+};
+
+Block.prototype.expression = function (expr, escape, process) {
+    this.flush(false);
+    var task;
+    if (Array.isArray(expr)) {
+        task = this.compiler.promiseProvider.all('[' + expr.join(', ') + ']');
     } else {
-      this.buf.push('buf.push("' + str + '");');
-      this.lastBufferedType = 'text';
-      this.bufferStartChar = '"';
-      this.lastBuffered = str;
-      this.lastBufferedIdx = this.buf.length;
+        task = this.compiler.promiseProvider.promise(expr);
     }
-  },
-
-  /**
-   * Buffer the given `src` so it is evaluated at run time
-   *
-   * @param {String} src
-   * @api public
-   */
-
-  bufferExpression: function (src) {
-    if (isConstant(src)) {
-      return this.buffer(toConstant(src) + '', false)
+    if (process) {
+        if (!Array.isArray(process)) {
+            process = [process];
+        }
+        process.forEach(function (mapper) {
+            task += '.then(' + mapper + ')';
+        });
     }
-    if (this.lastBufferedIdx == this.buf.length) {
-      if (this.lastBufferedType === 'text') this.lastBuffered += '"';
-      this.lastBufferedType = 'code';
-      this.lastBuffered += ' + (' + src + ')';
-      this.buf[this.lastBufferedIdx - 1] = 'buf.push(' + this.bufferStartChar + this.lastBuffered + ');'
+    if (escape) {
+        task += '.then(' + this.compiler.getEscapedWriter() + ')';
+    }
+    this.data.push(task);
+};
+
+Block.prototype.code = function (expr) {
+    this.simple = false;
+    this.flush(true);
+    this.body += expr;
+};
+
+function AsyncCompiler(node, options) {
+    this.options = options = options || {};
+    this.prettyPrint = Boolean(options.pretty);
+    this.node = node;
+    this.promiseProvider = new DefaultPromiseProvider('vow');
+    this.blocks = [];
+    this.mixins = {};
+    this.mainBlock = this.createBlock();
+    this.hasWrittenDoctype = false;
+    this.hasVisitedTag = false;
+    this.terse = false;
+    this.xml = false;
+    this.doctype = null;
+    this.escape = false;
+    this.dynamicMixins = false;
+}
+
+AsyncCompiler.prototype.getEscapedWriter = function () {
+    return '$escape';
+};
+
+AsyncCompiler.prototype.getIteratorFunction = function () {
+    return '$each';
+};
+
+AsyncCompiler.prototype.getDataSourceName = function () {
+    return 'data';
+};
+
+AsyncCompiler.prototype.getOutputStreamName = function () {
+    return 'stream';
+};
+
+AsyncCompiler.prototype.getIterator = function (itemFn, alternativeFn) {
+    return this.getIteratorFunction() + '(' + itemFn + (alternativeFn ? ', ' + alternativeFn : '') + ')';
+};
+
+AsyncCompiler.prototype.createBlock = function (parent, params) {
+    var block = new Block(this, '$b' + this.blocks.length, params || [], parent);
+    this.blocks.push(block);
+    return block;
+};
+
+AsyncCompiler.prototype.compile = function () {
+    this.visit(this.node, this.mainBlock);
+
+    var globals = [
+        this.promiseProvider.name,
+        '$escape',
+        this.getIteratorFunction(),
+        '$attrs',
+        '$attr',
+        'jade'
+    ];
+
+    var fn = '';
+    fn += 'var buff = [];';
+    fn += 'var write = ' + this.getOutputStreamName() + ' ? writeAll : writeBuff;';
+    fn += this.getDataSourceName() + ' = ' + this.getDataSourceName() + ' || {};';
+
+    if (this.dynamicMixins) {
+        fn += 'var $mixins = {';
+        Object.keys(this.mixins).forEach(function (name, i) {
+            if (i > 0) {
+                fn += ', ';
+            }
+            fn += JSON.stringify(name) + ': ' + this.mixins[name].name;
+        }, this);
+        fn += '};';
+    }
+
+    fn += 'function writeBuff(data) { buff.push(String(data)); }';
+    fn += 'function writeAll(data) { data = String(data); buff.push(data); stream.write(data); }';
+    fn += 'function isArray(value) { return Object.prototype.toString.call(value) === "[object Array]"; }';
+    fn += 'function $escape(value) { return jade.escape(value); }';
+
+    fn += 'function $each(itemFn, altFn) {';
+    fn += '    return function (items) {';
+    fn += '        var i, len, result = [], count = 0;';
+    fn += '        if (isArray(items)) {';
+    fn += '            for (i = 0, len = items.length; i < len; ++i) {';
+    fn += '                result.push(itemFn(items[i], i));';
+    fn += '                count++;';
+    fn += '            }';
+    fn += '        } else {';
+    fn += '            for (i in items) {';
+    fn += '                if (Object.prototype.hasOwnProperty.call(items, i)) {';
+    fn += '                    result.push(itemFn(items[i], i));';
+    fn += '                    count++;';
+    fn += '                }';
+    fn += '            }';
+    fn += '        }';
+    fn += '        if (count === 0) {';
+    fn += '            result.push(altFn());';
+    fn += '        }';
+    fn += '        return result;';
+    fn += '    };';
+    fn += '}';
+
+    fn += 'function $attrs(attrs) {';
+    fn += '    return jade.attrs(jade.merge(attrs), ' + JSON.stringify(this.terse) + ');';
+    fn += '}';
+
+    fn += 'function $attr(attr) {';
+    fn += '    return jade.attr(attr[0], attr[1], attr[2], ' + JSON.stringify(this.terse) + ');';
+    fn += '}';
+
+    fn += 'function output(items, i) {';
+    fn += '    if (i < items.length) {';
+    fn += '        var item = items[i];';
+    fn += '        if (isArray(item)) {';
+    fn += '            return output(item, 0).then(function () {';
+    fn += '                return output(items, i + 1);';
+    fn += '            });';
+    fn += '        } else if(vow.isPromise(item)) {';
+    fn += '            return item.then(function (resolved) {';
+    fn += '                items[i] = resolved;';
+    fn += '                return output(items, i);';
+    fn += '            });';
+    fn += '        } else {';
+    fn += '            if (item != null) {';
+    fn += '                write(item);';
+    fn += '            }';
+    fn += '            return output(items, i + 1);';
+    fn += '        }';
+    fn += '    }';
+    fn += '    return vow.fulfill(buff.join(""));';
+    fn += '}';
+
+    function addLocals(locals) {
+        var result = [];
+        globals.forEach(function (name) {
+            result.push(name);
+        });
+        locals.forEach(function (name) {
+            result.push(name);
+        });
+        return result;
+    }
+
+    this.blocks.forEach(function (block) {
+        globals.push(block.name);
+    });
+    this.blocks.forEach(function (block) {
+        block.finish();
+        fn += 'function ' + block.name + '(' + block.params.join(', ') + ') {';
+        fn += addWith(this.getDataSourceName(), block.body, addLocals(block.params));
+        fn += ' }';
+    }, this);
+
+    fn += 'return output(' + this.mainBlock.name + '(), 0).then(function () {';
+    fn += '    return buff.join("");';
+    fn += '});';
+
+    return {
+        params: [
+            'jade',
+            this.promiseProvider.name,
+            this.getDataSourceName(),
+            this.getOutputStreamName()
+        ],
+        body: fn
+    };
+};
+
+AsyncCompiler.prototype.setDoctype = function (name) {
+    this.doctype = doctypes[name.toLowerCase()] || '<!DOCTYPE ' + name + '>';
+    this.terse = this.doctype.toLowerCase() === '<!doctype html>';
+    this.xml = 0 === this.doctype.indexOf('<?xml');
+};
+
+AsyncCompiler.prototype.visit = function (node, block) {
+    this['visit' + node.type](node, block);
+};
+
+AsyncCompiler.prototype.visitBlock = function (node, block) {
+    var len = node.nodes.length;
+    var prettyPrint = this.prettyPrint && !this.escape;
+    if (prettyPrint && len > 1 && node.nodes[0].isText && node.nodes[1].isText) {
+        block.indent(0, true, true);
+    }
+    node.nodes.forEach(function (childNode, i) {
+        if (prettyPrint && i > 0 && childNode.isText && node.nodes[i - 1].isText) {
+            block.indent(0, true, false);
+        }
+        this.visit(childNode, block);
+        if (i + 1 < len && childNode.isText && node.nodes[i + 1].isText) {
+            block.raw('\n');
+        }
+    }, this);
+};
+
+AsyncCompiler.prototype.visitCase = function (node, block) {
+    var body = this.createBlock(block, ['$caseValue']);
+    block.expression(node.expr, false, body.name);
+    body.code('switch ($caseValue) {');
+    this.visit(node.block, body);
+    body.code('}');
+};
+
+AsyncCompiler.prototype.visitWhen = function (node, block) {
+    if ('default' === node.expr) {
+        block.code('default:');
     } else {
-      this.buf.push('buf.push(' + src + ');');
-      this.lastBufferedType = 'code';
-      this.bufferStartChar = '';
-      this.lastBuffered = '(' + src + ')';
-      this.lastBufferedIdx = this.buf.length;
-    }
-  },
-
-  /**
-   * Buffer an indent based on the current `indent`
-   * property and an additional `offset`.
-   *
-   * @param {Number} offset
-   * @param {Boolean} newline
-   * @api public
-   */
-
-  prettyIndent: function(offset, newline){
-    offset = offset || 0;
-    newline = newline ? '\n' : '';
-    this.buffer(newline + Array(this.indents + offset).join('  '));
-    if (this.parentIndents)
-      this.buf.push("buf.push.apply(buf, jade_indent);");
-  },
-
-  /**
-   * Visit `node`.
-   *
-   * @param {Node} node
-   * @api public
-   */
-
-  visit: function(node){
-    var debug = this.debug;
-
-    if (debug) {
-      this.buf.push('jade_debug.unshift({ lineno: ' + node.line
-        + ', filename: ' + (node.filename
-          ? JSON.stringify(node.filename)
-          : 'jade_debug[0].filename')
-        + ' });');
-    }
-
-    // Massive hack to fix our context
-    // stack for - else[ if] etc
-    if (false === node.debug && this.debug) {
-      this.buf.pop();
-      this.buf.pop();
-    }
-
-    this.visitNode(node);
-
-    if (debug) this.buf.push('jade_debug.shift();');
-  },
-
-  /**
-   * Visit `node`.
-   *
-   * @param {Node} node
-   * @api public
-   */
-
-  visitNode: function(node){
-    return this['visit' + node.type](node);
-  },
-
-  /**
-   * Visit case `node`.
-   *
-   * @param {Literal} node
-   * @api public
-   */
-
-  visitCase: function(node){
-    var _ = this.withinCase;
-    this.withinCase = true;
-    this.buf.push('switch (' + node.expr + '){');
-    this.visit(node.block);
-    this.buf.push('}');
-    this.withinCase = _;
-  },
-
-  /**
-   * Visit when `node`.
-   *
-   * @param {Literal} node
-   * @api public
-   */
-
-  visitWhen: function(node){
-    if ('default' == node.expr) {
-      this.buf.push('default:');
-    } else {
-      this.buf.push('case ' + node.expr + ':');
+        block.code('case ' + node.expr + ':');
     }
     if (node.block) {
-      this.visit(node.block);
-      this.buf.push('  break;');
+        this.visit(node.block, block);
+        block.code('break;');
     }
-  },
+};
 
-  /**
-   * Visit literal `node`.
-   *
-   * @param {Literal} node
-   * @api public
-   */
+AsyncCompiler.prototype.visitLiteral = function (node, block) {
+    block.raw(node.str);
+};
 
-  visitLiteral: function(node){
-    this.buffer(node.str);
-  },
+AsyncCompiler.prototype.visitMixinBlock = function (node, block) {
+    // TODO: indent +1
+    block.code('if (block) {');
+    block.expression('block()', false);
+    block.code('}');
+    // TODO: indent -1
+};
 
-  /**
-   * Visit all nodes in `block`.
-   *
-   * @param {Block} block
-   * @api public
-   */
-
-  visitBlock: function(block){
-    var len = block.nodes.length
-      , escape = this.escape
-      , pp = this.pp
-
-    // Pretty print multi-line text
-    if (pp && len > 1 && !escape && block.nodes[0].isText && block.nodes[1].isText)
-      this.prettyIndent(1, true);
-
-    for (var i = 0; i < len; ++i) {
-      // Pretty print text
-      if (pp && i > 0 && !escape && block.nodes[i].isText && block.nodes[i-1].isText)
-        this.prettyIndent(1, false);
-
-      this.visit(block.nodes[i]);
-      // Multiple text nodes are separated by newlines
-      if (block.nodes[i+1] && block.nodes[i].isText && block.nodes[i+1].isText)
-        this.buffer('\n');
+AsyncCompiler.prototype.visitDoctype = function (node, block) {
+    if (node && (node.val || !this.doctype)) {
+        this.setDoctype(node.val || 'default');
     }
-  },
+    if (this.doctype) {
+        block.raw(this.doctype);
+    }
+    this.hasWrittenDoctype = true;
+};
 
-  /**
-   * Visit a mixin's `block` keyword.
-   *
-   * @param {MixinBlock} block
-   * @api public
-   */
-
-  visitMixinBlock: function(block){
-    if (this.pp) this.buf.push("jade_indent.push('" + Array(this.indents + 1).join('  ') + "');");
-    this.buf.push('block && block();');
-    if (this.pp) this.buf.push("jade_indent.pop();");
-  },
-
-  /**
-   * Visit `doctype`. Sets terse mode to `true` when html 5
-   * is used, causing self-closing tags to end with ">" vs "/>",
-   * and boolean attributes are not mirrored.
-   *
-   * @param {Doctype} doctype
-   * @api public
-   */
-
-  visitDoctype: function(doctype){
-    if (doctype && (doctype.val || !this.doctype)) {
-      this.setDoctype(doctype.val || 'default');
+AsyncCompiler.prototype.visitMixin = function (node, block) {
+    var name = node.name;
+    var dynamic = name.charAt(0) === '#';
+    var mixin;
+    if (dynamic) {
+        this.dynamicMixins = true;
+        name = name.substr(2, name.length - 3);
+    } else if (Object.prototype.hasOwnProperty.call(this.mixins, name)) {
+        mixin = this.mixins[name];
+    } else {
+        var params = ['block', 'attributes'];
+        mixin = this.mixins[name] = {
+            block: this.createBlock(null, params),
+            used: false
+        };
+        mixin.name = mixin.block.name;
     }
 
-    if (this.doctype) this.buffer(this.doctype);
-    this.hasCompiledDoctype = true;
-  },
-
-  /**
-   * Visit `mixin`, generating a function that
-   * may be called within the template.
-   *
-   * @param {Mixin} mixin
-   * @api public
-   */
-
-  visitMixin: function(mixin){
-    var name = 'jade_mixins[';
-    var args = mixin.args || '';
-    var block = mixin.block;
-    var attrs = mixin.attrs;
-    var attrsBlocks = mixin.attributeBlocks;
-    var pp = this.pp;
-    var dynamic = mixin.name[0]==='#';
-    var key = mixin.name;
-    if (dynamic) this.dynamicMixins = true;
-    name += (dynamic ? mixin.name.substr(2,mixin.name.length-3):'"'+mixin.name+'"')+']';
-
-    this.mixins[key] = this.mixins[key] || {used: false, instances: []};
-    if (mixin.call) {
-      this.mixins[key].used = true;
-      if (pp) this.buf.push("jade_indent.push('" + Array(this.indents + 1).join('  ') + "');")
-      if (block || attrs.length || attrsBlocks.length) {
-
-        this.buf.push(name + '.call({');
-
-        if (block) {
-          this.buf.push('block: function(){');
-
-          // Render block with no indents, dynamically added when rendered
-          this.parentIndents++;
-          var _indents = this.indents;
-          this.indents = 0;
-          this.visit(mixin.block);
-          this.indents = _indents;
-          this.parentIndents--;
-
-          if (attrs.length || attrsBlocks.length) {
-            this.buf.push('},');
-          } else {
-            this.buf.push('}');
-          }
+    if (node.call) {
+        var innerBlock = 'null';
+        var attrs = 'null';
+        var args = node.args || '';
+        if (node.block) {
+            innerBlock = this.createBlock(null);
+            this.visit(node.block, innerBlock);
+            innerBlock = innerBlock.name;
+        }
+        if (node.attributeBlocks) {
+            if (node.attrs.length) {
+                node.attributeBlocks.unshift(this.attrs(node.attrs));
+            }
+            attrs = this.promiseProvider.all('[' + node.attributeBlocks.join(', ') + ']') + '.then(jade.merge)';
+        } else if (node.attrs.length) {
+            attrs = this.attrs(node.attrs);
         }
 
-        if (attrsBlocks.length) {
-          if (attrs.length) {
-            var val = this.attrs(attrs);
-            attrsBlocks.unshift(val);
-          }
-          this.buf.push('attributes: jade.merge([' + attrsBlocks.join(',') + '])');
-        } else if (attrs.length) {
-          var val = this.attrs(attrs);
-          this.buf.push('attributes: ' + val);
-        }
-
-        if (args) {
-          this.buf.push('}, ' + args + ');');
+        if (dynamic) {
+            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
+                args = name + ', ' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+                block.expression(
+                    this.promiseProvider.all('[' + args + ']'),
+                    false,
+                    'function (args) { var name = args.shift(); return $mixins[name].apply(null, args); }'
+                );
+            } else {
+                block.expression(name, false, 'function (name) { $mixins[name](); }');
+            }
         } else {
-          this.buf.push('});');
+            mixin.used = true;
+            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
+                args = innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+                block.expression(
+                    this.promiseProvider.all('[' + args + ']'),
+                    false,
+                    'function (args) { return ' + mixin.name + '.apply(null, args); }'
+                );
+            } else {
+                block.expression(mixin.name + '()', false);
+            }
         }
-
-      } else {
-        this.buf.push(name + '(' + args + ');');
-      }
-      if (pp) this.buf.push("jade_indent.pop();")
     } else {
-      var mixin_start = this.buf.length;
-      this.buf.push(name + ' = function(' + args + '){');
-      this.buf.push('var block = (this && this.block), attributes = (this && this.attributes) || {};');
-      this.parentIndents++;
-      this.visit(block);
-      this.parentIndents--;
-      this.buf.push('};');
-      var mixin_end = this.buf.length;
-      this.mixins[key].instances.push({start: mixin_start, end: mixin_end});
+        mixin.block.params.splice(2, mixin.block.params.length - 2);
+        if (node.args) {
+            node.args.split(/\s*,\s*/).forEach(function (arg) {
+                mixin.block.params.push(arg);
+            });
+        }
+        mixin.block.clear();
+        this.visit(node.block, mixin.block);
     }
-  },
+};
 
-  /**
-   * Visit `tag` buffering tag markup, generating
-   * attributes, visiting the `tag`'s code and block.
-   *
-   * @param {Tag} tag
-   * @api public
-   */
-
-  visitTag: function(tag){
-    this.indents++;
-    var name = tag.name
-      , pp = this.pp
-      , self = this;
-
-    function bufferName() {
-      if (tag.buffer) self.bufferExpression(name);
-      else self.buffer(name);
+AsyncCompiler.prototype.visitTag = function (node, block) {
+    var name = node.name;
+    if (!this.hasVisitedTag) {
+        if (!this.hasWrittenDoctype && 'html' === name) {
+            this.visitDoctype();
+        }
+        this.hasVisitedTag = true;
     }
 
-    if ('pre' == tag.name) this.escape = true;
-
-    if (!this.hasCompiledTag) {
-      if (!this.hasCompiledDoctype && 'html' == name) {
-        this.visitDoctype();
-      }
-      this.hasCompiledTag = true;
+    function tagName() {
+        if (node.buffer) {
+            block.expression(name, false);
+        } else {
+            block.raw(name);
+        }
     }
 
-    // pretty print
-    if (pp && !tag.isInline())
-      this.prettyIndent(0, true);
+    var oldEscape = this.escape;
+    if (name === 'pre') {
+        this.escape = true;
+    }
 
-    if (tag.selfClosing || (!this.xml && selfClosing.indexOf(tag.name) !== -1)) {
-      this.buffer('<');
-      bufferName();
-      this.visitAttributes(tag.attrs, tag.attributeBlocks);
-      this.terse
-        ? this.buffer('>')
-        : this.buffer('/>');
-      // if it is non-empty throw an error
-      if (tag.block &&
-          !(tag.block.type === 'Block' && tag.block.nodes.length === 0) &&
-          tag.block.nodes.some(function (tag) {
-            return tag.type !== 'Text' || !/^\s*$/.test(tag.val)
-          })) {
-        throw errorAtNode(tag, new Error(name + ' is self closing and should not have content.'));
-      }
+    if (this.prettyPrint && !node.isInline()) {
+        block.indent(0, true, true);
+    }
+
+    var isSelfClosing = node.selfClosing || (!this.xml && selfClosing.indexOf(name) !== -1);
+    if (isSelfClosing) {
+        block.raw('<');
+        tagName();
+        this.visitAttributes(node.attrs, node.attributeBlocks, block);
+        block.raw(this.terse ? '>' : '/>');
+        // TODO: error if block non-empty
     } else {
-      // Optimize attributes buffering
-      this.buffer('<');
-      bufferName();
-      this.visitAttributes(tag.attrs, tag.attributeBlocks);
-      this.buffer('>');
-      if (tag.code) this.visitCode(tag.code);
-      this.visit(tag.block);
-
-      // pretty print
-      if (pp && !tag.isInline() && 'pre' != tag.name && !tag.canInline())
-        this.prettyIndent(0, true);
-
-      this.buffer('</');
-      bufferName();
-      this.buffer('>');
+        block.raw('<');
+        tagName();
+        this.visitAttributes(node.attrs, node.attributeBlocks, block);
+        block.raw('>');
+        if (node.code) {
+            this.visit(node.code, block);
+        }
+        block.indent(1, false);
+        this.visit(node.block, block);
+        block.indent(-1, false);
+        if (this.prettyPrint && !node.isInline() && 'pre' !== name && !node.canInline()) {
+            block.indent(0, true, true);
+        }
+        block.raw('</');
+        // TODO: не вычислять повторно, кешировать результат
+        tagName();
+        block.raw('>');
     }
 
-    if ('pre' == tag.name) this.escape = false;
-
-    this.indents--;
-  },
-
-  /**
-   * Visit `filter`, throwing when the filter does not exist.
-   *
-   * @param {Filter} filter
-   * @api public
-   */
-
-  visitFilter: function(filter){
-    var text = filter.block.nodes.map(
-      function(node){ return node.val; }
-    ).join('\n');
-    filter.attrs.filename = this.options.filename;
-    try {
-      this.buffer(filters(filter.name, text, filter.attrs), true);
-    } catch (err) {
-      throw errorAtNode(filter, err);
+    if (name === 'pre') {
+        this.escape = oldEscape;
     }
-  },
+};
 
-  /**
-   * Visit `text` node.
-   *
-   * @param {Text} text
-   * @api public
-   */
+AsyncCompiler.prototype.visitFilter = function (node, block) {
+    var text = node.block.nodes.map(function (childNode) {
+        return childNode.val;
+    }).join('\n');
+    node.attrs.filename = this.options.filename;
+    block.raw(filters(node.name, text, node.attrs), true);
+};
 
-  visitText: function(text){
-    this.buffer(text.val, true);
-  },
+AsyncCompiler.prototype.visitText = function (node, block) {
+    block.raw(node.val, true);
+};
 
-  /**
-   * Visit a `comment`, only buffering when the buffer flag is set.
-   *
-   * @param {Comment} comment
-   * @api public
-   */
+AsyncCompiler.prototype.visitComment = function (node, block) {
+    if (node.buffer) {
+        block.raw('<!--' + node.val + '-->');
+    }
+};
 
-  visitComment: function(comment){
-    if (!comment.buffer) return;
-    if (this.pp) this.prettyIndent(1, true);
-    this.buffer('<!--' + comment.val + '-->');
-  },
+AsyncCompiler.prototype.visitBlockComment = function (node, block) {
+    if (node.buffer) {
+        block.raw('<!--' + node.val);
+        this.visit(node.block, block);
+        block.raw('-->');
+    }
+};
 
-  /**
-   * Visit a `BlockComment`.
-   *
-   * @param {Comment} comment
-   * @api public
-   */
-
-  visitBlockComment: function(comment){
-    if (!comment.buffer) return;
-    if (this.pp) this.prettyIndent(1, true);
-    this.buffer('<!--' + comment.val);
-    this.visit(comment.block);
-    if (this.pp) this.prettyIndent(1, true);
-    this.buffer('-->');
-  },
-
-  /**
-   * Visit `code`, respecting buffer / escape flags.
-   * If the code is followed by a block, wrap it in
-   * a self-calling function.
-   *
-   * @param {Code} code
-   * @api public
-   */
-
-  visitCode: function(code){
-    // Wrap code blocks with {}.
-    // we only wrap unbuffered code blocks ATM
-    // since they are usually flow control
-
-    // Buffer code
-    if (code.buffer) {
-      var val = code.val.trimLeft();
-      val = 'null == (jade_interp = '+val+') ? "" : jade_interp';
-      if (code.escape) val = 'jade.escape(' + val + ')';
-      this.bufferExpression(val);
+AsyncCompiler.prototype.visitCode = function (node, block) {
+    if (node.buffer) {
+        block.expression(node.val.trimLeft(), node.escape);
     } else {
-      this.buf.push(code.val);
+        block.code(node.val);
+        if (node.block) {
+            if (!node.buffer) {
+                block.code('{');
+            }
+            this.visit(node.block, block);
+            if (!node.buffer) {
+                block.code('}');
+            }
+        } else {
+            block.code(';');
+        }
     }
+};
 
-    // Block support
-    if (code.block) {
-      if (!code.buffer) this.buf.push('{');
-      this.visit(code.block);
-      if (!code.buffer) this.buf.push('}');
+AsyncCompiler.prototype.visitEach = function (node, block) {
+    var itemBlock = this.createBlock(block, [node.val, node.key]);
+    this.visit(node.block, itemBlock);
+    var alternativeBlock = null;
+    if (node.alternative) {
+        alternativeBlock = this.createBlock(block);
+        this.visit(node.alternative, alternativeBlock);
     }
-  },
+    block.expression(node.obj, false, this.getIterator(
+        itemBlock.name,
+        alternativeBlock ? alternativeBlock.name : null
+    ));
+};
 
-  /**
-   * Visit `each` block.
-   *
-   * @param {Each} each
-   * @api public
-   */
-
-  visitEach: function(each){
-    this.buf.push(''
-      + '// iterate ' + each.obj + '\n'
-      + ';(function(){\n'
-      + '  var $$obj = ' + each.obj + ';\n'
-      + '  if (\'number\' == typeof $$obj.length) {\n');
-
-    if (each.alternative) {
-      this.buf.push('  if ($$obj.length) {');
-    }
-
-    this.buf.push(''
-      + '    for (var ' + each.key + ' = 0, $$l = $$obj.length; ' + each.key + ' < $$l; ' + each.key + '++) {\n'
-      + '      var ' + each.val + ' = $$obj[' + each.key + '];\n');
-
-    this.visit(each.block);
-
-    this.buf.push('    }\n');
-
-    if (each.alternative) {
-      this.buf.push('  } else {');
-      this.visit(each.alternative);
-      this.buf.push('  }');
-    }
-
-    this.buf.push(''
-      + '  } else {\n'
-      + '    var $$l = 0;\n'
-      + '    for (var ' + each.key + ' in $$obj) {\n'
-      + '      $$l++;'
-      + '      var ' + each.val + ' = $$obj[' + each.key + '];\n');
-
-    this.visit(each.block);
-
-    this.buf.push('    }\n');
-    if (each.alternative) {
-      this.buf.push('    if ($$l === 0) {');
-      this.visit(each.alternative);
-      this.buf.push('    }');
-    }
-    this.buf.push('  }\n}).call(this);\n');
-  },
-
-  /**
-   * Visit `attrs`.
-   *
-   * @param {Array} attrs
-   * @api public
-   */
-
-  visitAttributes: function(attrs, attributeBlocks){
+AsyncCompiler.prototype.visitAttributes = function (attrs, attributeBlocks, block) {
     if (attributeBlocks.length) {
-      if (attrs.length) {
-        var val = this.attrs(attrs);
-        attributeBlocks.unshift(val);
-      }
-      this.bufferExpression('jade.attrs(jade.merge([' + attributeBlocks.join(',') + ']), ' + JSON.stringify(this.terse) + ')');
+        if (attrs.length) {
+            var val = this.attrs(attrs);
+            attributeBlocks.unshift(val);
+        }
+        block.expression(attributeBlocks, false, ['$attrs']);
     } else if (attrs.length) {
-      this.attrs(attrs, true);
+        this.attrs(attrs, block);
     }
-  },
+};
 
-  /**
-   * Compile attributes.
-   */
-
-  attrs: function(attrs, buffer){
+AsyncCompiler.prototype.attrs = function (attrs, block) {
     var buf = [];
     var classes = [];
     var classEscaping = [];
 
-    attrs.forEach(function(attr){
-      var key = attr.name;
-      var escaped = attr.escaped;
+    attrs.forEach(function (attr) {
+        var key = attr.name;
+        var escaped = attr.escaped;
+        var val;
 
-      if (key === 'class') {
-        classes.push(attr.val);
-        classEscaping.push(attr.escaped);
-      } else if (isConstant(attr.val)) {
-        if (buffer) {
-          this.buffer(runtime.attr(key, toConstant(attr.val), escaped, this.terse));
+        if (key === 'class') {
+            classes.push(attr.val);
+            classEscaping.push(attr.escaped);
+        } else if (isConstant(attr.val)) {
+            if (block) {
+                block.raw(runtime.attr(key, toConstant(attr.val), escaped, this.terse));
+            } else {
+                val = toConstant(attr.val);
+                if (escaped && !(key.indexOf('data') === 0 && typeof val !== 'string')) {
+                    val = runtime.escape(val);
+                }
+                buf.push(JSON.stringify(key) + ': ' + JSON.stringify(val));
+            }
         } else {
-          var val = toConstant(attr.val);
-          if (escaped && !(key.indexOf('data') === 0 && typeof val !== 'string')) {
-            val = runtime.escape(val);
-          }
-          buf.push(JSON.stringify(key) + ': ' + JSON.stringify(val));
+            if (block) {
+                block.expression([JSON.stringify(key), attr.val, JSON.stringify(escaped)], false, ['$attr']);
+            } else {
+                val = attr.val;
+                if (escaped) {
+                    val = this.promiseProvider.promise(val) + '.then(jade.escape)';
+                }
+                buf.push(JSON.stringify(key) + ': ' + val);
+            }
         }
-      } else {
-        if (buffer) {
-          this.bufferExpression('jade.attr("' + key + '", ' + attr.val + ', ' + JSON.stringify(escaped) + ', ' + JSON.stringify(this.terse) + ')');
+    }, this);
+    if (block) {
+        if (classes.every(isConstant)) {
+            block.raw(runtime.cls(classes.map(toConstant), classEscaping));
         } else {
-          var val = attr.val;
-          if (escaped && !(key.indexOf('data') === 0)) {
-            val = 'jade.escape(' + val + ')';
-          } else if (escaped) {
-            val = '(typeof (jade_interp = ' + val + ') == "string" ? jade.escape(jade_interp) : jade_interp)';
-          }
-          buf.push(JSON.stringify(key) + ': ' + val);
+            block.expression(
+                classes,
+                false,
+                'function (classes) { return jade.cls(classes, ' + JSON.stringify(classEscaping) + '); }'
+            );
         }
-      }
-    }.bind(this));
-    if (buffer) {
-      if (classes.every(isConstant)) {
-        this.buffer(runtime.cls(classes.map(toConstant), classEscaping));
-      } else {
-        this.bufferExpression('jade.cls([' + classes.join(',') + '], ' + JSON.stringify(classEscaping) + ')');
-      }
     } else if (classes.length) {
-      if (classes.every(isConstant)) {
-        classes = JSON.stringify(runtime.joinClasses(classes.map(toConstant).map(runtime.joinClasses).map(function (cls, i) {
-          return classEscaping[i] ? runtime.escape(cls) : cls;
-        })));
-      } else {
-        classes = '(jade_interp = ' + JSON.stringify(classEscaping) + ',' +
-          ' jade.joinClasses([' + classes.join(',') + '].map(jade.joinClasses).map(function (cls, i) {' +
-          '   return jade_interp[i] ? jade.escape(cls) : cls' +
-          ' }))' +
-          ')';
-      }
-      if (classes.length)
-        buf.push('"class": ' + classes);
+        if (classes.every(isConstant)) {
+            classes = JSON.stringify(runtime.joinClasses(classes.map(toConstant).map(runtime.joinClasses).map(function (cls, i) {
+                return classEscaping[i] ? runtime.escape(cls) : cls;
+            })));
+        } else {
+            classes = this.promiseProvider.all(classes) + '.then(function (classes) {';
+            classes += '    var escaping = ' + JSON.stringify(classEscaping) + ';';
+            classes += '    return jade.joinClasses(';
+            classes += '        classes.map(jade.joinClasses).map(function (cls, i) {';
+            classes += '            return escaping[i] ? jade.escape(cls) : cls;';
+            classes += '        })';
+            classes += '    );';
+            classes += '})';
+        }
+        if (classes.length) {
+            buf.push('"class": ' + classes);
+        }
     }
-    return '{' + buf.join(',') + '}';
-  }
+    return this.promiseProvider.all('{' + buf.join(',') + '}');
 };
 
-},{"./doctypes":2,"./filters":3,"./nodes":16,"./runtime":24,"./self-closing":25,"./utils":26,"character-parser":33,"constantinople":34}],2:[function(_dereq_,module,exports){
+module.exports = AsyncCompiler;
+
+},{"./doctypes":2,"./filters":3,"./runtime":24,"./self-closing":25,"character-parser":33,"constantinople":34,"with":47}],2:[function(_dereq_,module,exports){
 'use strict';
 
 module.exports = {
@@ -766,12 +713,12 @@ module.exports = [
  * Module dependencies.
  */
 
-var Parser = _dereq_('./parser')
-  , Lexer = _dereq_('./lexer')
-  , Compiler = _dereq_('./compiler')
-  , runtime = _dereq_('./runtime')
-  , addWith = _dereq_('with')
-  , fs = _dereq_('fs');
+var Parser = _dereq_('./parser');
+var Lexer = _dereq_('./lexer');
+var AsyncCompiler = _dereq_('./async-compiler');
+var runtime = _dereq_('./runtime');
+var vow = _dereq_('vow');
+var fs = _dereq_('fs');
 
 /**
  * Expose self closing tags.
@@ -801,7 +748,7 @@ exports.utils = _dereq_('./utils');
  * Expose `Compiler`.
  */
 
-exports.Compiler = Compiler;
+exports.Compiler = AsyncCompiler;
 
 /**
  * Expose `Parser`.
@@ -855,38 +802,15 @@ function parse(str, options){
   }
 
   // Compile
-  var compiler = new (options.compiler || Compiler)(tokens, options);
-  var js;
-  try {
-    js = compiler.compile();
-  } catch (err) {
-    if (err.line && (err.filename || !options.filename)) {
-      runtime.rethrow(err, err.filename, err.line, parser.input);
-    }
-  }
+  var compiler = new (options.compiler || AsyncCompiler)(tokens, options);
+  var js = compiler.compile();
 
   // Debug compiler
   if (options.debug) {
     console.error('\nCompiled Function:\n\n\u001b[90m%s\u001b[0m', js.replace(/^/gm, '  '));
   }
 
-  var globals = [];
-
-  globals.push('jade');
-  globals.push('jade_mixins');
-  globals.push('jade_interp');
-  globals.push('jade_debug');
-  globals.push('buf');
-
-  var body = ''
-    + 'var buf = [];\n'
-    + 'var jade_mixins = {};\n'
-    + 'var jade_interp;\n'
-    + (options.self
-      ? 'var self = locals || {};\n' + js
-      : addWith('locals || {}', '\n' + js, globals)) + ';'
-    + 'return buf.join("");';
-  return {body: body, dependencies: parser.dependencies};
+  return js;
 }
 
 /**
@@ -905,40 +829,9 @@ function parse(str, options){
  * @api public
  */
 
-exports.compile = function(str, options){
-  var options = options || {}
-    , filename = options.filename
-      ? JSON.stringify(options.filename)
-      : 'undefined'
-    , fn;
-
-  str = String(str);
-
-  var parsed = parse(str, options);
-  if (options.compileDebug !== false) {
-    fn = [
-        'var jade_debug = [{ lineno: 1, filename: ' + filename + ' }];'
-      , 'try {'
-      , parsed.body
-      , '} catch (err) {'
-      , '  jade.rethrow(err, jade_debug[0].filename, jade_debug[0].lineno' + (options.compileDebug === true ? ',' + JSON.stringify(str) : '') + ');'
-      , '}'
-    ].join('\n');
-  } else {
-    fn = parsed.body;
-  }
-  fn = new Function('locals, jade', fn)
-  var res = function(locals){ return fn(locals, Object.create(runtime)) };
-  if (options.client) {
-    res.toString = function () {
-      var err = new Error('The `client` option is deprecated, use the `jade.compileClient` method instead');
-      err.name = 'Warning';
-      console.error(err.stack || err.message);
-      return exports.compileClient(str, options);
-    };
-  }
-  res.dependencies = parsed.dependencies;
-  return res;
+exports.compile = function(str, options) {
+    var code = parse(String(str), options);
+    return new Function(code.params.join(','), code.body).bind(null, runtime, vow);
 };
 
 /**
@@ -956,31 +849,8 @@ exports.compile = function(str, options){
  * @api public
  */
 
-exports.compileClient = function(str, options){
-  var options = options || {}
-    , filename = options.filename
-      ? JSON.stringify(options.filename)
-      : 'undefined'
-    , fn;
-
-  str = String(str);
-
-  if (options.compileDebug) {
-    options.compileDebug = true;
-    fn = [
-        'var jade_debug = [{ lineno: 1, filename: ' + filename + ' }];'
-      , 'try {'
-      , parse(str, options).body
-      , '} catch (err) {'
-      , '  jade.rethrow(err, jade_debug[0].filename, jade_debug[0].lineno, ' + JSON.stringify(str) + ');'
-      , '}'
-    ].join('\n');
-  } else {
-    options.compileDebug = false;
-    fn = parse(str, options).body;
-  }
-
-  return 'function template(locals) {\n' + fn + '\n}';
+exports.compileClient = function(str, options) {
+  return parse(String(str), options).body;
 };
 
 
@@ -1094,7 +964,7 @@ exports.compileFileClient = function(path, options){
 
 exports.__express = exports.renderFile;
 
-},{"./compiler":1,"./doctypes":2,"./filters":3,"./lexer":6,"./nodes":16,"./parser":23,"./runtime":24,"./self-closing":25,"./utils":26,"fs":27,"with":46}],6:[function(_dereq_,module,exports){
+},{"./async-compiler":1,"./doctypes":2,"./filters":3,"./lexer":6,"./nodes":16,"./parser":23,"./runtime":24,"./self-closing":25,"./utils":26,"fs":27,"vow":46}],6:[function(_dereq_,module,exports){
 'use strict';
 
 var utils = _dereq_('./utils');
@@ -1376,7 +1246,7 @@ Lexer.prototype = {
    * Text.
    */
 
-  escaped: function() {
+  text: function() {
     return this.scan(/^(?:\| ?| )([^\n]+)/, 'text') || this.scan(/^(<[^\n]*)/, 'text');
   },
 
@@ -2019,7 +1889,7 @@ Lexer.prototype = {
       || this.attrs()
       || this.attributesBlock()
       || this.indent()
-      || this.escaped()
+      || this.text()
       || this.comment()
       || this.colon()
       || this.dot()
@@ -8692,7 +8562,7 @@ var EX_EOF = {};
 function tokenizer($TEXT, filename, html5_comments) {
 
     var S = {
-        escaped            : $TEXT.replace(/\r\n?|[\n\u2028\u2029]/g, "\n").replace(/\uFEFF/g, ''),
+        text            : $TEXT.replace(/\r\n?|[\n\u2028\u2029]/g, "\n").replace(/\uFEFF/g, ''),
         filename        : filename,
         pos             : 0,
         tokpos          : 0,
@@ -8705,10 +8575,10 @@ function tokenizer($TEXT, filename, html5_comments) {
         comments_before : []
     };
 
-    function peek() { return S.escaped.charAt(S.pos); };
+    function peek() { return S.text.charAt(S.pos); };
 
     function next(signal_eof, in_string) {
-        var ch = S.escaped.charAt(S.pos++);
+        var ch = S.text.charAt(S.pos++);
         if (signal_eof && !ch)
             throw EX_EOF;
         if (ch == "\n") {
@@ -8726,11 +8596,11 @@ function tokenizer($TEXT, filename, html5_comments) {
     };
 
     function looking_at(str) {
-        return S.escaped.substr(S.pos, str.length) == str;
+        return S.text.substr(S.pos, str.length) == str;
     };
 
     function find(what, signal_eof) {
-        var pos = S.escaped.indexOf(what, S.pos);
+        var pos = S.text.indexOf(what, S.pos);
         if (signal_eof && pos == -1) throw EX_EOF;
         return pos;
     };
@@ -8872,10 +8742,10 @@ function tokenizer($TEXT, filename, html5_comments) {
         var regex_allowed = S.regex_allowed;
         var i = find("\n"), ret;
         if (i == -1) {
-            ret = S.escaped.substr(S.pos);
-            S.pos = S.escaped.length;
+            ret = S.text.substr(S.pos);
+            S.pos = S.text.length;
         } else {
-            ret = S.escaped.substring(S.pos, i);
+            ret = S.text.substring(S.pos, i);
             S.pos = i;
         }
         S.comments_before.push(token(type, ret, true));
@@ -8886,7 +8756,7 @@ function tokenizer($TEXT, filename, html5_comments) {
     var skip_multiline_comment = with_eof_error("Unterminated multiline comment", function(){
         var regex_allowed = S.regex_allowed;
         var i = find("*/", true);
-        var text = S.escaped.substring(S.pos, i);
+        var text = S.text.substring(S.pos, i);
         var a = text.split("\n"), n = a.length;
         // update stream position
         S.pos = i + 2;
@@ -15040,6 +14910,590 @@ exports.describe_ast = function () {
     return out + "";
 };
 },{"source-map":35,"util":32}],46:[function(_dereq_,module,exports){
+(function (process){
+/**
+ * Vow
+ *
+ * Copyright (c) 2012-2013 Filatov Dmitry (dfilatov@yandex-team.ru)
+ * Dual licensed under the MIT and GPL licenses:
+ * http://www.opensource.org/licenses/mit-license.php
+ * http://www.gnu.org/licenses/gpl.html
+ *
+ * @version 0.3.13
+ */
+
+(function(global) {
+
+var Promise = function(val) {
+    this._res = val;
+
+    this._isFulfilled = !!arguments.length;
+    this._isRejected = false;
+
+    this._fulfilledCallbacks = [];
+    this._rejectedCallbacks = [];
+    this._progressCallbacks = [];
+};
+
+Promise.prototype = {
+    valueOf : function() {
+        return this._res;
+    },
+
+    isFulfilled : function() {
+        return this._isFulfilled;
+    },
+
+    isRejected : function() {
+        return this._isRejected;
+    },
+
+    isResolved : function() {
+        return this._isFulfilled || this._isRejected;
+    },
+
+    fulfill : function(val) {
+        if(this.isResolved()) {
+            return;
+        }
+
+        this._isFulfilled = true;
+        this._res = val;
+
+        this._callCallbacks(this._fulfilledCallbacks, val);
+        this._fulfilledCallbacks = this._rejectedCallbacks = this._progressCallbacks = undef;
+    },
+
+    reject : function(err) {
+        if(this.isResolved()) {
+            return;
+        }
+
+        this._isRejected = true;
+        this._res = err;
+
+        this._callCallbacks(this._rejectedCallbacks, err);
+        this._fulfilledCallbacks = this._rejectedCallbacks = this._progressCallbacks = undef;
+    },
+
+    notify : function(val) {
+        if(this.isResolved()) {
+            return;
+        }
+
+        this._callCallbacks(this._progressCallbacks, val);
+    },
+
+    then : function(onFulfilled, onRejected, onProgress, ctx) {
+        if(onRejected && !isFunction(onRejected)) {
+            ctx = onRejected;
+            onRejected = undef;
+        }
+        else if(onProgress && !isFunction(onProgress)) {
+            ctx = onProgress;
+            onProgress = undef;
+        }
+
+        var promise = new Promise(),
+            cb;
+
+        if(!this._isRejected) {
+            cb = { promise : promise, fn : isFunction(onFulfilled)? onFulfilled : undef, ctx : ctx };
+            this._isFulfilled?
+                this._callCallbacks([cb], this._res) :
+                this._fulfilledCallbacks.push(cb);
+        }
+
+        if(!this._isFulfilled) {
+            cb = { promise : promise, fn : onRejected, ctx : ctx };
+            this._isRejected?
+                this._callCallbacks([cb], this._res) :
+                this._rejectedCallbacks.push(cb);
+        }
+
+        this.isResolved() || this._progressCallbacks.push({ promise : promise, fn : onProgress, ctx : ctx });
+
+        return promise;
+    },
+
+    fail : function(onRejected, ctx) {
+        return this.then(undef, onRejected, ctx);
+    },
+
+    always : function(onResolved, ctx) {
+        var _this = this,
+            cb = function() {
+                return onResolved.call(this, _this);
+            };
+
+        return this.then(cb, cb, ctx);
+    },
+
+    progress : function(onProgress, ctx) {
+        return this.then(undef, undef, onProgress, ctx);
+    },
+
+    spread : function(onFulfilled, onRejected, ctx) {
+        return this.then(
+            function(val) {
+                return onFulfilled.apply(this, val);
+            },
+            onRejected,
+            ctx);
+    },
+
+    done : function(onFulfilled, onRejected, onProgress, ctx) {
+        this
+            .then(onFulfilled, onRejected, onProgress, ctx)
+            .fail(throwException);
+    },
+
+    delay : function(delay) {
+        var timer,
+            promise = this.then(function(val) {
+                var promise = new Promise();
+                timer = setTimeout(
+                    function() {
+                        promise.fulfill(val);
+                    },
+                    delay);
+
+                return promise;
+            });
+
+        promise.always(function() {
+            clearTimeout(timer);
+        });
+
+        return promise;
+    },
+
+    timeout : function(timeout) {
+        var promise = new Promise(),
+            timer = setTimeout(
+                function() {
+                    promise.reject(Error('timed out'));
+                },
+                timeout);
+
+        promise.sync(this);
+        promise.always(function() {
+            clearTimeout(timer);
+        });
+
+        return promise;
+    },
+
+    sync : function(promise) {
+        promise.then(
+            this.fulfill,
+            this.reject,
+            this.notify,
+            this);
+    },
+
+    _callCallbacks : function(callbacks, arg) {
+        var len = callbacks.length;
+        if(!len) {
+            return;
+        }
+
+        var isResolved = this.isResolved(),
+            isFulfilled = this.isFulfilled();
+
+        nextTick(function() {
+            var i = 0, cb, promise, fn;
+            while(i < len) {
+                cb = callbacks[i++];
+                promise = cb.promise;
+                fn = cb.fn;
+
+                if(fn) {
+                    var ctx = cb.ctx,
+                        res;
+                    try {
+                        res = ctx? fn.call(ctx, arg) : fn(arg);
+                    }
+                    catch(e) {
+                        promise.reject(e);
+                        continue;
+                    }
+
+                    isResolved?
+                        Vow.isPromise(res)?
+                            (function(promise) {
+                                res.then(
+                                    function(val) {
+                                        promise.fulfill(val);
+                                    },
+                                    function(err) {
+                                        promise.reject(err);
+                                    },
+                                    function(val) {
+                                        promise.notify(val);
+                                    });
+                            })(promise) :
+                            promise.fulfill(res) :
+                        promise.notify(res);
+                }
+                else {
+                    isResolved?
+                        isFulfilled?
+                            promise.fulfill(arg) :
+                            promise.reject(arg) :
+                        promise.notify(arg);
+                }
+            }
+        });
+    }
+};
+
+var Vow = {
+    Promise : Promise,
+
+    promise : function(val) {
+        return arguments.length?
+            Vow.isPromise(val)?
+                val :
+                new Promise(val) :
+            new Promise();
+    },
+
+    when : function(obj, onFulfilled, onRejected, onProgress, ctx) {
+        return Vow.promise(obj).then(onFulfilled, onRejected, onProgress, ctx);
+    },
+
+    fail : function(obj, onRejected, ctx) {
+        return Vow.when(obj, undef, onRejected, ctx);
+    },
+
+    always : function(obj, onResolved, ctx) {
+        return Vow.promise(obj).always(onResolved, ctx);
+    },
+
+    progress : function(obj, onProgress, ctx) {
+        return Vow.promise(obj).progress(onProgress, ctx);
+    },
+
+    spread : function(obj, onFulfilled, onRejected, ctx) {
+        return Vow.promise(obj).spread(onFulfilled, onRejected, ctx);
+    },
+
+    done : function(obj, onFulfilled, onRejected, onProgress, ctx) {
+        Vow.promise(obj).done(onFulfilled, onRejected, onProgress, ctx);
+    },
+
+    isPromise : function(obj) {
+        return obj && isFunction(obj.then);
+    },
+
+    valueOf : function(obj) {
+        return Vow.isPromise(obj)? obj.valueOf() : obj;
+    },
+
+    isFulfilled : function(obj) {
+        return Vow.isPromise(obj)? obj.isFulfilled() : true;
+    },
+
+    isRejected : function(obj) {
+        return Vow.isPromise(obj)? obj.isRejected() : false;
+    },
+
+    isResolved : function(obj) {
+        return Vow.isPromise(obj)? obj.isResolved() : true;
+    },
+
+    fulfill : function(val) {
+        return Vow.when(val, undef, function(err) {
+            return err;
+        });
+    },
+
+    reject : function(err) {
+        return Vow.when(err, function(val) {
+            var promise = new Promise();
+            promise.reject(val);
+            return promise;
+        });
+    },
+
+    resolve : function(val) {
+        return Vow.isPromise(val)? val : Vow.when(val);
+    },
+
+    invoke : function(fn) {
+        try {
+            return Vow.promise(fn.apply(global, slice.call(arguments, 1)));
+        }
+        catch(e) {
+            return Vow.reject(e);
+        }
+    },
+
+    forEach : function(promises, onFulfilled, onRejected, keys) {
+        var len = keys? keys.length : promises.length,
+            i = 0;
+        while(i < len) {
+            Vow.when(promises[keys? keys[i] : i], onFulfilled, onRejected);
+            ++i;
+        }
+    },
+
+    all : function(promises) {
+        var resPromise = new Promise(),
+            isPromisesArray = isArray(promises),
+            keys = isPromisesArray?
+                getArrayKeys(promises) :
+                getObjectKeys(promises),
+            len = keys.length,
+            res = isPromisesArray? [] : {};
+
+        if(!len) {
+            resPromise.fulfill(res);
+            return resPromise;
+        }
+
+        var i = len,
+            onFulfilled = function() {
+                if(!--i) {
+                    var j = 0;
+                    while(j < len) {
+                        res[keys[j]] = Vow.valueOf(promises[keys[j++]]);
+                    }
+                    resPromise.fulfill(res);
+                }
+            },
+            onRejected = function(err) {
+                resPromise.reject(err);
+            };
+
+        Vow.forEach(promises, onFulfilled, onRejected, keys);
+
+        return resPromise;
+    },
+
+    allResolved : function(promises) {
+        var resPromise = new Promise(),
+            isPromisesArray = isArray(promises),
+            keys = isPromisesArray?
+                getArrayKeys(promises) :
+                getObjectKeys(promises),
+            i = keys.length,
+            res = isPromisesArray? [] : {};
+
+        if(!i) {
+            resPromise.fulfill(res);
+            return resPromise;
+        }
+
+        var onProgress = function() {
+                --i || resPromise.fulfill(promises);
+            };
+
+        Vow.forEach(promises, onProgress, onProgress, keys);
+
+        return resPromise;
+    },
+
+    allPatiently : function(promises) {
+        return Vow.allResolved(promises).then(function() {
+            var isPromisesArray = isArray(promises),
+                keys = isPromisesArray?
+                    getArrayKeys(promises) :
+                    getObjectKeys(promises),
+                rejectedPromises, fulfilledPromises,
+                len = keys.length, i = 0, key, promise;
+
+            if(!len) {
+                return isPromisesArray? [] : {};
+            }
+
+            while(i < len) {
+                key = keys[i++];
+                promise = promises[key];
+                if(Vow.isRejected(promise)) {
+                    rejectedPromises || (rejectedPromises = isPromisesArray? [] : {});
+                    isPromisesArray?
+                        rejectedPromises.push(promise.valueOf()) :
+                        rejectedPromises[key] = promise.valueOf();
+                }
+                else if(!rejectedPromises) {
+                    (fulfilledPromises || (fulfilledPromises = isPromisesArray? [] : {}))[key] = Vow.valueOf(promise);
+                }
+            }
+
+            if(rejectedPromises) {
+                throw rejectedPromises;
+            }
+
+            return fulfilledPromises;
+        });
+    },
+
+    any : function(promises) {
+        var resPromise = new Promise(),
+            len = promises.length;
+
+        if(!len) {
+            resPromise.reject(Error());
+            return resPromise;
+        }
+
+        var i = 0, err,
+            onFulfilled = function(val) {
+                resPromise.fulfill(val);
+            },
+            onRejected = function(e) {
+                i || (err = e);
+                ++i === len && resPromise.reject(err);
+            };
+
+        Vow.forEach(promises, onFulfilled, onRejected);
+
+        return resPromise;
+    },
+
+    delay : function(val, timeout) {
+        return Vow.promise(val).delay(timeout);
+    },
+
+    timeout : function(val, timeout) {
+        return Vow.promise(val).timeout(timeout);
+    }
+};
+
+var undef,
+    nextTick = (function() {
+        var fns = [],
+            enqueueFn = function(fn) {
+                return fns.push(fn) === 1;
+            },
+            callFns = function() {
+                var fnsToCall = fns, i = 0, len = fns.length;
+                fns = [];
+                while(i < len) {
+                    fnsToCall[i++]();
+                }
+            };
+
+        if(typeof setImmediate === 'function') { // ie10, nodejs >= 0.10
+            return function(fn) {
+                enqueueFn(fn) && setImmediate(callFns);
+            };
+        }
+
+        if(typeof process === 'object' && process.nextTick) { // nodejs < 0.10
+            return function(fn) {
+                enqueueFn(fn) && process.nextTick(callFns);
+            };
+        }
+
+        if(global.postMessage) { // modern browsers
+            var isPostMessageAsync = true;
+            if(global.attachEvent) {
+                var checkAsync = function() {
+                        isPostMessageAsync = false;
+                    };
+                global.attachEvent('onmessage', checkAsync);
+                global.postMessage('__checkAsync', '*');
+                global.detachEvent('onmessage', checkAsync);
+            }
+
+            if(isPostMessageAsync) {
+                var msg = '__promise' + +new Date,
+                    onMessage = function(e) {
+                        if(e.data === msg) {
+                            e.stopPropagation && e.stopPropagation();
+                            callFns();
+                        }
+                    };
+
+                global.addEventListener?
+                    global.addEventListener('message', onMessage, true) :
+                    global.attachEvent('onmessage', onMessage);
+
+                return function(fn) {
+                    enqueueFn(fn) && global.postMessage(msg, '*');
+                };
+            }
+        }
+
+        var doc = global.document;
+        if('onreadystatechange' in doc.createElement('script')) { // ie6-ie8
+            var createScript = function() {
+                    var script = doc.createElement('script');
+                    script.onreadystatechange = function() {
+                        script.parentNode.removeChild(script);
+                        script = script.onreadystatechange = null;
+                        callFns();
+                };
+                (doc.documentElement || doc.body).appendChild(script);
+            };
+
+            return function(fn) {
+                enqueueFn(fn) && createScript();
+            };
+        }
+
+        return function(fn) { // old browsers
+            enqueueFn(fn) && setTimeout(callFns, 0);
+        };
+    })(),
+    throwException = function(e) {
+        nextTick(function() {
+            throw e;
+        });
+    },
+    isFunction = function(obj) {
+        return typeof obj === 'function';
+    },
+    slice = Array.prototype.slice,
+    toStr = Object.prototype.toString,
+    isArray = Array.isArray || function(obj) {
+        return toStr.call(obj) === '[object Array]';
+    },
+    getArrayKeys = function(arr) {
+        var res = [],
+            i = 0, len = arr.length;
+        while(i < len) {
+            res.push(i++);
+        }
+        return res;
+    },
+    getObjectKeys = Object.keys || function(obj) {
+        var res = [];
+        for(var i in obj) {
+            obj.hasOwnProperty(i) && res.push(i);
+        }
+        return res;
+    };
+
+var defineAsGlobal = true;
+if(typeof exports === 'object') {
+    module.exports = Vow;
+    defineAsGlobal = false;
+}
+
+if(typeof modules === 'object') {
+    modules.define('vow', function(provide) {
+        provide(Vow);
+    });
+    defineAsGlobal = false;
+}
+
+if(typeof define === 'function') {
+    define(function(_dereq_, exports, module) {
+        module.exports = Vow;
+    });
+    defineAsGlobal = false;
+}
+
+defineAsGlobal && (global.Vow = Vow);
+
+})(this);
+
+}).call(this,_dereq_("FWaASH"))
+},{"FWaASH":30}],47:[function(_dereq_,module,exports){
 'use strict';
 
 var uglify = _dereq_('uglify-js')
