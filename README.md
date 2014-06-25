@@ -23,7 +23,7 @@ test.js
 var jade = require('jade-async');
 var vow = require('vow');
 
-var tpl = jade.compile('template.jade');
+var tpl = jade.compileFile('template.jade');
 var data = {
 	getGreeting: function(username) {
 		return vow.delay('Hello, ' + username + '!', 500);
