@@ -7,7 +7,8 @@ var jade = require('../');
 
 var perfTest = fs.readFileSync(__dirname + '/fixtures/perf.jade', 'utf8')
 
-describe('jade', function(){
+// TODO
+xdescribe('jade', function(){
 
   describe('.properties', function(){
     it('should have exports', function(){
