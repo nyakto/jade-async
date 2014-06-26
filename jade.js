@@ -31,18 +31,27 @@ DefaultPromiseProvider.prototype.fulfill = function (value) {
 };
 
 DefaultPromiseProvider.prototype.promise = function (value) {
-    return this.name + '.promise(' + value + ')';
+    var isPromise = value.substr(0, this.name.length + 1) === this.name + '.' &&
+        /^[^.]+\.(all|fulfill|promise)\(.*\)$/.test(value);
+    return isPromise ? value : this.name + '.promise(' + value + ')';
 };
 
 DefaultPromiseProvider.prototype.all = function (value) {
     return this.name + '.all(' + value + ')';
 };
 
-function Block(compiler, name, params, parent) {
+function Block(compiler, name, params, parent, dynamicIndent) {
     this.compiler = compiler;
     this.name = name;
     this.params = params;
-    this.indentSize = parent ? parent.indentSize : 0;
+    this.indentSize = 0;
+    this.isNested = false;
+    if (parent) {
+        this.isNested = true;
+        this.indentSize = parent.indentSize;
+        parent.nested.push(this);
+    }
+    this.dynamicIndent = Boolean(dynamicIndent);
     this.clear();
 }
 
@@ -51,6 +60,7 @@ Block.prototype.clear = function () {
     this.header = false;
     this.buff = '';
     this.data = [];
+    this.nested = [];
     this.body = '';
 };
 
@@ -107,8 +117,21 @@ Block.prototype.indent = function (size, write, newLine) {
         if (newLine) {
             this.raw('\n');
         }
+        if (this.dynamicIndent) {
+            this.expression('$indent');
+        }
         this.raw(new Array(this.indentSize + 1).join("  "));
     }
+};
+
+Block.prototype.getIndentation = function () {
+    var result = [
+        this.dynamicIndent ? '$indent' : '',
+        JSON.stringify(new Array(this.indentSize + 1).join('  '))
+    ].filter(function (item) {
+        return item.length > 0;
+    });
+    return result.length > 0 ? result.join(' + ') : JSON.stringify('');
 };
 
 Block.prototype.finish = function () {
@@ -116,6 +139,30 @@ Block.prototype.finish = function () {
     if (!this.simple) {
         this.body += 'return buff;';
     }
+};
+
+Block.prototype.compile = function (globals) {
+    var code = '';
+    var locals = [];
+
+    this.finish();
+    globals.forEach(function (name) {
+        locals.push(name);
+    });
+    this.params.forEach(function (name) {
+        locals.push(name);
+    });
+    this.nested.forEach(function (nestedBlock) {
+        locals.push(nestedBlock.name);
+    });
+
+    code += 'function ' + this.name + '(' + this.params.join(', ') + ') {';
+    code += this.nested.map(function (nestedBlock) {
+        return nestedBlock.compile(locals);
+    }).join('');
+    code += addWith(this.compiler.getDataSourceName(), this.body, locals);
+    code += ' }';
+    return code;
 };
 
 Block.prototype.expression = function (expr, escape, process) {
@@ -183,8 +230,9 @@ AsyncCompiler.prototype.getIterator = function (itemFn, alternativeFn) {
     return this.getIteratorFunction() + '(' + itemFn + (alternativeFn ? ', ' + alternativeFn : '') + ')';
 };
 
-AsyncCompiler.prototype.createBlock = function (parent, params) {
-    var block = new Block(this, '$b' + this.blocks.length, params || [], parent);
+AsyncCompiler.prototype.createBlock = function (parent, params, dynamicIndent) {
+    params = params || [];
+    var block = new Block(this, '$b' + this.blocks.length, params, parent, dynamicIndent);
     this.blocks.push(block);
     return block;
 };
@@ -198,6 +246,7 @@ AsyncCompiler.prototype.compile = function () {
         this.getIteratorFunction(),
         '$attrs',
         '$attr',
+        '$mixins',
         'jade'
     ];
 
@@ -275,26 +324,16 @@ AsyncCompiler.prototype.compile = function () {
     fn += '    return vow.fulfill(buff.join(""));';
     fn += '}';
 
-    function addLocals(locals) {
-        var result = [];
-        globals.forEach(function (name) {
-            result.push(name);
-        });
-        locals.forEach(function (name) {
-            result.push(name);
-        });
-        return result;
-    }
+    var globalBlocks = this.blocks.filter(function (block) {
+        return !block.isNested;
+    });
 
-    this.blocks.forEach(function (block) {
+    globalBlocks.forEach(function (block) {
         globals.push(block.name);
     });
-    this.blocks.forEach(function (block) {
-        block.finish();
-        fn += 'function ' + block.name + '(' + block.params.join(', ') + ') {';
-        fn += addWith(this.getDataSourceName(), block.body, addLocals(block.params));
-        fn += ' }';
-    }, this);
+    fn += globalBlocks.map(function (block) {
+        return block.compile(globals);
+    }, this).join('');
 
     fn += 'return output(' + this.mainBlock.name + '(), 0).then(function () {';
     fn += '    return buff.join("");';
@@ -365,7 +404,7 @@ AsyncCompiler.prototype.visitLiteral = function (node, block) {
 AsyncCompiler.prototype.visitMixinBlock = function (node, block) {
     // TODO: indent +1
     block.code('if (block) {');
-    block.expression('block()', false);
+    block.expression('block(' + block.getIndentation() + ')', false);
     block.code('}');
     // TODO: indent -1
 };
@@ -383,31 +422,43 @@ AsyncCompiler.prototype.visitDoctype = function (node, block) {
 AsyncCompiler.prototype.visitMixin = function (node, block) {
     var name = node.name;
     var dynamic = name.charAt(0) === '#';
-    var mixin;
+    var mixin, override = false;
     if (dynamic) {
         this.dynamicMixins = true;
         name = name.substr(2, name.length - 3);
     } else if (Object.prototype.hasOwnProperty.call(this.mixins, name)) {
         mixin = this.mixins[name];
+        if (mixin.declared) {
+            override = true;
+        }
     } else {
-        var params = ['block', 'attributes'];
+        var params = ['$indent', 'block', 'attributes'];
         mixin = this.mixins[name] = {
-            block: this.createBlock(null, params),
+            block: this.createBlock(null, params, true),
+            declared: false,
             used: false
         };
         mixin.name = mixin.block.name;
     }
 
     if (node.call) {
+        var indentation = block.getIndentation();
         var innerBlock = 'null';
-        var attrs = 'null';
+        var attrs = '{}';
         var args = node.args || '';
         if (node.block) {
-            innerBlock = this.createBlock(null);
+            if (block.isMixin) {
+                innerBlock = this.createBlock(null, ['$indent', 'block'], true);
+            } else {
+                innerBlock = this.createBlock(null, ['$indent'], true);
+            }
             this.visit(node.block, innerBlock);
             innerBlock = innerBlock.name;
+            if (block.isMixin) {
+                innerBlock = 'function ($indent) { return ' + innerBlock + '($indent, block); }';
+            }
         }
-        if (node.attributeBlocks) {
+        if (node.attributeBlocks.length) {
             if (node.attrs.length) {
                 node.attributeBlocks.unshift(this.attrs(node.attrs));
             }
@@ -417,37 +468,33 @@ AsyncCompiler.prototype.visitMixin = function (node, block) {
         }
 
         if (dynamic) {
-            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
-                args = name + ', ' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
-                block.expression(
-                    this.promiseProvider.all('[' + args + ']'),
-                    false,
-                    'function (args) { var name = args.shift(); return $mixins[name].apply(null, args); }'
-                );
-            } else {
-                block.expression(name, false, 'function (name) { $mixins[name](); }');
-            }
+            args = name + ', ' + indentation + ',' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+            block.expression(
+                this.promiseProvider.all('[' + args + ']'),
+                false,
+                'function (args) { var name = args.shift(); return $mixins[name].apply(null, args); }'
+            );
         } else {
             mixin.used = true;
-            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
-                args = innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
-                block.expression(
-                    this.promiseProvider.all('[' + args + ']'),
-                    false,
-                    'function (args) { return ' + mixin.name + '.apply(null, args); }'
-                );
-            } else {
-                block.expression(mixin.name + '()', false);
-            }
+            args = indentation + ',' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+            block.expression(
+                this.promiseProvider.all('[' + args + ']'),
+                false,
+                'function (args) { return ' + mixin.name + '.apply(null, args); }'
+            );
         }
     } else {
-        mixin.block.params.splice(2, mixin.block.params.length - 2);
+        if (override) {
+            mixin.block = this.createBlock(null, ['$indent', 'block', 'attributes'], true);
+            mixin.name = mixin.block.name;
+        }
+        mixin.block.isMixin = true;
+        mixin.declared = true;
         if (node.args) {
             node.args.split(/\s*,\s*/).forEach(function (arg) {
                 mixin.block.params.push(arg);
             });
         }
-        mixin.block.clear();
         this.visit(node.block, mixin.block);
     }
 };
@@ -524,14 +571,23 @@ AsyncCompiler.prototype.visitText = function (node, block) {
 
 AsyncCompiler.prototype.visitComment = function (node, block) {
     if (node.buffer) {
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('<!--' + node.val + '-->');
     }
 };
 
 AsyncCompiler.prototype.visitBlockComment = function (node, block) {
     if (node.buffer) {
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('<!--' + node.val);
         this.visit(node.block, block);
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('-->');
     }
 };
@@ -632,7 +688,7 @@ AsyncCompiler.prototype.attrs = function (attrs, block) {
                 return classEscaping[i] ? runtime.escape(cls) : cls;
             })));
         } else {
-            classes = this.promiseProvider.all(classes) + '.then(function (classes) {';
+            classes = this.promiseProvider.all('[' + classes + ']') + '.then(function (classes) {';
             classes += '    var escaping = ' + JSON.stringify(classEscaping) + ';';
             classes += '    return jade.joinClasses(';
             classes += '        classes.map(jade.joinClasses).map(function (cls, i) {';
@@ -789,7 +845,7 @@ function parse(str, options) {
     var js = compiler.compile();
 
     if (options.debug) {
-        console.error('\nCompiled Function:\n\n\u001b[90m%s\u001b[0m', js.replace(/^/gm, '  '));
+        console.error('\nCompiled Function:\n\n\u001b[90m%s\u001b[0m', js.body.replace(/^/gm, '  '));
     }
 
     return js;
