@@ -3,9 +3,9 @@ var runtime = _dereq_('./runtime');
 var filters = _dereq_('./filters');
 var doctypes = _dereq_('./doctypes');
 var selfClosing = _dereq_('./self-closing');
-var addWith = _dereq_('with');
 var parseJSExpression = _dereq_('character-parser').parseMax;
 var constantinople = _dereq_('constantinople');
+var uglify = _dereq_('uglify-js');
 
 function isConstant(src) {
     return constantinople(src, {
@@ -22,6 +22,82 @@ function toConstant(src) {
     );
 }
 
+function addWith(obj, src, exclude) {
+    exclude = exclude || [];
+    exclude.push(
+        obj,
+        'Infinity',
+        'NaN',
+        'undefined',
+        'eval',
+        'isFinite',
+        'isNaN',
+        'parseFloat',
+        'parseInt',
+        'decodeURI',
+        'decodeURIComponent',
+        'encodeURI',
+        'encodeURIComponent',
+        'Object',
+        'Function',
+        'Boolean',
+        'Error',
+        'EvalError',
+        'InternalError',
+        'RangeError',
+        'ReferenceError',
+        'SyntaxError',
+        'TypeError',
+        'URIError',
+        'Number',
+        'Math',
+        'Date',
+        'String',
+        'RegExp',
+        'Array',
+        'JSON'
+    );
+
+    function detect(src) {
+        var ast = uglify.parse('(function () {' + src + '}())');
+        ast.figure_out_scope();
+        return ast.globals.map(function (node, name) {
+            return name;
+        });
+    }
+
+    function wrap(src, vars) {
+        var inputVars = vars.map(function (name) {
+            return obj + "." + name;
+        });
+
+        return 'return (function(' + vars.join(',') + '){' + src + '}(' + inputVars.join(',') + '));';
+    }
+
+    var vars = detect(src).filter(function (name) {
+        return exclude.indexOf(name) === -1;
+    });
+
+    if (vars.length === 0) {
+        return src;
+    }
+
+    return wrap(src, vars);
+}
+
+function findLocals(src) {
+    var ast = uglify.parse('function $ast() {' + src + '}');
+    ast.figure_out_scope();
+    var fn = ast.body[0];
+    var result = [];
+    fn.variables.each(function (node) {
+        if (!node.global) {
+            result.push(node.name);
+        }
+    });
+    return result;
+}
+
 function DefaultPromiseProvider(name) {
     this.name = name;
 }
@@ -30,7 +106,18 @@ DefaultPromiseProvider.prototype.fulfill = function (value) {
     return this.name + '.fulfill(' + value + ')';
 };
 
+DefaultPromiseProvider.prototype.isPromise = function (value) {
+    var prefix = value.substr(0, this.name.length + 1);
+    if (prefix === this.name + '.') {
+        return /^[^.]+\.(all|fulfill|promise)\(.*\)$/.test(value);
+    }
+    return false;
+};
+
 DefaultPromiseProvider.prototype.promise = function (value) {
+    if (this.isPromise(value)) {
+        return value;
+    }
     return this.name + '.promise(' + value + ')';
 };
 
@@ -38,11 +125,18 @@ DefaultPromiseProvider.prototype.all = function (value) {
     return this.name + '.all(' + value + ')';
 };
 
-function Block(compiler, name, params, parent) {
+function Block(compiler, name, params, parent, dynamicIndent) {
     this.compiler = compiler;
     this.name = name;
     this.params = params;
-    this.indentSize = parent ? parent.indentSize : 0;
+    this.indentSize = 0;
+    this.isNested = false;
+    if (parent) {
+        this.isNested = true;
+        this.indentSize = parent.indentSize;
+        parent.nested.push(this);
+    }
+    this.dynamicIndent = Boolean(dynamicIndent);
     this.clear();
 }
 
@@ -51,6 +145,7 @@ Block.prototype.clear = function () {
     this.header = false;
     this.buff = '';
     this.data = [];
+    this.nested = [];
     this.body = '';
 };
 
@@ -78,9 +173,7 @@ Block.prototype.raw = function (str, interpolate) {
 Block.prototype.flush = function (renderData) {
     if (this.buff.length > 0) {
         this.data.push(
-            this.compiler.promiseProvider.fulfill(
-                JSON.stringify(this.buff)
-            )
+            JSON.stringify(this.buff)
         );
         this.buff = '';
     }
@@ -107,8 +200,21 @@ Block.prototype.indent = function (size, write, newLine) {
         if (newLine) {
             this.raw('\n');
         }
+        if (this.dynamicIndent) {
+            this.expression('$indent');
+        }
         this.raw(new Array(this.indentSize + 1).join("  "));
     }
+};
+
+Block.prototype.getIndentation = function () {
+    var result = [
+        this.dynamicIndent ? '$indent' : '',
+        JSON.stringify(new Array(this.indentSize + 1).join('  '))
+    ].filter(function (item) {
+        return item.length > 0;
+    });
+    return result.length > 0 ? result.join(' + ') : JSON.stringify('');
 };
 
 Block.prototype.finish = function () {
@@ -118,7 +224,48 @@ Block.prototype.finish = function () {
     }
 };
 
+Block.prototype.compile = function (globals) {
+    var code = '';
+    var locals = [];
+    this.finish();
+
+    globals.forEach(function (name) {
+        locals.push(name);
+    });
+    this.params.forEach(function (name) {
+        locals.push(name);
+    });
+    this.nested.forEach(function (nestedBlock) {
+        locals.push(nestedBlock.name);
+    });
+    findLocals(this.body).forEach(function (name) {
+        locals.push(name);
+    });
+
+    code += 'function ' + this.name + '(' + this.params.join(', ') + ') {';
+    code += this.nested.map(function (nestedBlock) {
+        return nestedBlock.compile(locals);
+    }).join('');
+    if (this.compiler.useSelf) {
+        code += this.body;
+    } else {
+        code += addWith(this.compiler.getDataSourceName(), this.body, locals);
+    }
+    code += ' }';
+    return code;
+};
+
 Block.prototype.expression = function (expr, escape, process) {
+    if (!Array.isArray(expr) && isConstant(expr) && !process) {
+        var str = toConstant(expr);
+        if (str == null) {
+            return;
+        }
+        if (escape) {
+            str = runtime.escape(str);
+        }
+        return this.raw(str);
+    }
     this.flush(false);
     var task;
     if (Array.isArray(expr)) {
@@ -150,7 +297,7 @@ function AsyncCompiler(node, options) {
     this.options = options = options || {};
     this.prettyPrint = Boolean(options.pretty);
     this.node = node;
-    this.promiseProvider = new DefaultPromiseProvider('vow');
+    this.promiseProvider = new DefaultPromiseProvider('jade.vow');
     this.blocks = [];
     this.mixins = {};
     this.mainBlock = this.createBlock();
@@ -161,14 +308,11 @@ function AsyncCompiler(node, options) {
     this.doctype = null;
     this.escape = false;
     this.dynamicMixins = false;
+    this.useSelf = Boolean(options.self);
 }
 
 AsyncCompiler.prototype.getEscapedWriter = function () {
-    return '$escape';
-};
-
-AsyncCompiler.prototype.getIteratorFunction = function () {
-    return '$each';
+    return 'jade.escape';
 };
 
 AsyncCompiler.prototype.getDataSourceName = function () {
@@ -180,11 +324,12 @@ AsyncCompiler.prototype.getOutputStreamName = function () {
 };
 
 AsyncCompiler.prototype.getIterator = function (itemFn, alternativeFn) {
-    return this.getIteratorFunction() + '(' + itemFn + (alternativeFn ? ', ' + alternativeFn : '') + ')';
+    return 'jade.$each(' + itemFn + (alternativeFn ? ', ' + alternativeFn : '') + ')';
 };
 
-AsyncCompiler.prototype.createBlock = function (parent, params) {
-    var block = new Block(this, '$b' + this.blocks.length, params || [], parent);
+AsyncCompiler.prototype.createBlock = function (parent, params, dynamicIndent) {
+    params = params || [];
+    var block = new Block(this, '$b' + this.blocks.length, params, parent, dynamicIndent);
     this.blocks.push(block);
     return block;
 };
@@ -193,17 +338,18 @@ AsyncCompiler.prototype.compile = function () {
     this.visit(this.node, this.mainBlock);
 
     var globals = [
-        this.promiseProvider.name,
-        '$escape',
-        this.getIteratorFunction(),
         '$attrs',
         '$attr',
+        '$mixins',
         'jade'
     ];
 
     var fn = '';
+    if (this.useSelf) {
+        fn += 'var self = data || {};';
+    }
     fn += 'var buff = [];';
-    fn += 'var write = ' + this.getOutputStreamName() + ' ? writeAll : writeBuff;';
+    fn += 'var write = jade.createWriter(buff, ' + this.getOutputStreamName() + ' ? writeAll : writeBuff);';
     fn += this.getDataSourceName() + ' = ' + this.getDataSourceName() + ' || {};';
 
     if (this.dynamicMixins) {
@@ -219,31 +365,6 @@ AsyncCompiler.prototype.compile = function () {
 
     fn += 'function writeBuff(data) { buff.push(String(data)); }';
     fn += 'function writeAll(data) { data = String(data); buff.push(data); stream.write(data); }';
-    fn += 'function isArray(value) { return Object.prototype.toString.call(value) === "[object Array]"; }';
-    fn += 'function $escape(value) { return jade.escape(value); }';
-
-    fn += 'function $each(itemFn, altFn) {';
-    fn += '    return function (items) {';
-    fn += '        var i, len, result = [], count = 0;';
-    fn += '        if (isArray(items)) {';
-    fn += '            for (i = 0, len = items.length; i < len; ++i) {';
-    fn += '                result.push(itemFn(items[i], i));';
-    fn += '                count++;';
-    fn += '            }';
-    fn += '        } else {';
-    fn += '            for (i in items) {';
-    fn += '                if (Object.prototype.hasOwnProperty.call(items, i)) {';
-    fn += '                    result.push(itemFn(items[i], i));';
-    fn += '                    count++;';
-    fn += '                }';
-    fn += '            }';
-    fn += '        }';
-    fn += '        if (count === 0) {';
-    fn += '            result.push(altFn());';
-    fn += '        }';
-    fn += '        return result;';
-    fn += '    };';
-    fn += '}';
 
     fn += 'function $attrs(attrs) {';
     fn += '    return jade.attrs(jade.merge(attrs), ' + JSON.stringify(this.terse) + ');';
@@ -253,57 +374,24 @@ AsyncCompiler.prototype.compile = function () {
     fn += '    return jade.attr(attr[0], attr[1], attr[2], ' + JSON.stringify(this.terse) + ');';
     fn += '}';
 
-    fn += 'function output(items, i) {';
-    fn += '    if (i < items.length) {';
-    fn += '        var item = items[i];';
-    fn += '        if (isArray(item)) {';
-    fn += '            return output(item, 0).then(function () {';
-    fn += '                return output(items, i + 1);';
-    fn += '            });';
-    fn += '        } else if(vow.isPromise(item)) {';
-    fn += '            return item.then(function (resolved) {';
-    fn += '                items[i] = resolved;';
-    fn += '                return output(items, i);';
-    fn += '            });';
-    fn += '        } else {';
-    fn += '            if (item != null) {';
-    fn += '                write(item);';
-    fn += '            }';
-    fn += '            return output(items, i + 1);';
-    fn += '        }';
-    fn += '    }';
-    fn += '    return vow.fulfill(buff.join(""));';
-    fn += '}';
+    var globalBlocks = this.blocks.filter(function (block) {
+        return !block.isNested;
+    });
 
-    function addLocals(locals) {
-        var result = [];
-        globals.forEach(function (name) {
-            result.push(name);
-        });
-        locals.forEach(function (name) {
-            result.push(name);
-        });
-        return result;
-    }
-
-    this.blocks.forEach(function (block) {
+    globalBlocks.forEach(function (block) {
         globals.push(block.name);
     });
-    this.blocks.forEach(function (block) {
-        block.finish();
-        fn += 'function ' + block.name + '(' + block.params.join(', ') + ') {';
-        fn += addWith(this.getDataSourceName(), block.body, addLocals(block.params));
-        fn += ' }';
-    }, this);
+    fn += globalBlocks.map(function (block) {
+        return block.compile(globals);
+    }, this).join('');
 
-    fn += 'return output(' + this.mainBlock.name + '(), 0).then(function () {';
+    fn += 'return write(' + this.mainBlock.name + '(), 0).then(function () {';
     fn += '    return buff.join("");';
     fn += '});';
 
     return {
         params: [
             'jade',
-            this.promiseProvider.name,
             this.getDataSourceName(),
             this.getOutputStreamName()
         ],
@@ -363,11 +451,9 @@ AsyncCompiler.prototype.visitLiteral = function (node, block) {
 };
 
 AsyncCompiler.prototype.visitMixinBlock = function (node, block) {
-    // TODO: indent +1
     block.code('if (block) {');
-    block.expression('block()', false);
+    block.expression('block(' + block.getIndentation() + ')', false);
     block.code('}');
-    // TODO: indent -1
 };
 
 AsyncCompiler.prototype.visitDoctype = function (node, block) {
@@ -383,31 +469,43 @@ AsyncCompiler.prototype.visitDoctype = function (node, block) {
 AsyncCompiler.prototype.visitMixin = function (node, block) {
     var name = node.name;
     var dynamic = name.charAt(0) === '#';
-    var mixin;
+    var mixin, override = false;
     if (dynamic) {
         this.dynamicMixins = true;
         name = name.substr(2, name.length - 3);
     } else if (Object.prototype.hasOwnProperty.call(this.mixins, name)) {
         mixin = this.mixins[name];
+        if (mixin.declared) {
+            override = true;
+        }
     } else {
-        var params = ['block', 'attributes'];
+        var params = ['$indent', 'block', 'attributes'];
         mixin = this.mixins[name] = {
-            block: this.createBlock(null, params),
+            block: this.createBlock(null, params, true),
+            declared: false,
             used: false
         };
         mixin.name = mixin.block.name;
     }
 
     if (node.call) {
+        var indentation = block.getIndentation();
         var innerBlock = 'null';
-        var attrs = 'null';
+        var attrs = '{}';
         var args = node.args || '';
         if (node.block) {
-            innerBlock = this.createBlock(null);
+            if (block.isMixin) {
+                innerBlock = this.createBlock(null, ['$indent', 'block'], true);
+            } else {
+                innerBlock = this.createBlock(null, ['$indent'], true);
+            }
             this.visit(node.block, innerBlock);
             innerBlock = innerBlock.name;
+            if (block.isMixin) {
+                innerBlock = 'function ($indent) { return ' + innerBlock + '($indent, block); }';
+            }
         }
-        if (node.attributeBlocks) {
+        if (node.attributeBlocks.length) {
             if (node.attrs.length) {
                 node.attributeBlocks.unshift(this.attrs(node.attrs));
             }
@@ -417,37 +515,33 @@ AsyncCompiler.prototype.visitMixin = function (node, block) {
         }
 
         if (dynamic) {
-            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
-                args = name + ', ' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
-                block.expression(
-                    this.promiseProvider.all('[' + args + ']'),
-                    false,
-                    'function (args) { var name = args.shift(); return $mixins[name].apply(null, args); }'
-                );
-            } else {
-                block.expression(name, false, 'function (name) { $mixins[name](); }');
-            }
+            args = name + ', ' + indentation + ',' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+            block.expression(
+                this.promiseProvider.all('[' + args + ']'),
+                false,
+                'function (args) { var name = args.shift(); return $mixins[name].apply(null, args); }'
+            );
         } else {
             mixin.used = true;
-            if (args.length || innerBlock !== 'null' || attrs !== 'null') {
-                args = innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
-                block.expression(
-                    this.promiseProvider.all('[' + args + ']'),
-                    false,
-                    'function (args) { return ' + mixin.name + '.apply(null, args); }'
-                );
-            } else {
-                block.expression(mixin.name + '()', false);
-            }
+            args = indentation + ',' + innerBlock + ', ' + attrs + (args.length ? ', ' + args : '');
+            block.expression(
+                this.promiseProvider.all('[' + args + ']'),
+                false,
+                'function (args) { return ' + mixin.name + '.apply(null, args); }'
+            );
         }
     } else {
-        mixin.block.params.splice(2, mixin.block.params.length - 2);
+        if (override) {
+            mixin.block = this.createBlock(null, ['$indent', 'block', 'attributes'], true);
+            mixin.name = mixin.block.name;
+        }
+        mixin.block.isMixin = true;
+        mixin.declared = true;
         if (node.args) {
             node.args.split(/\s*,\s*/).forEach(function (arg) {
                 mixin.block.params.push(arg);
             });
         }
-        mixin.block.clear();
         this.visit(node.block, mixin.block);
     }
 };
@@ -524,14 +618,23 @@ AsyncCompiler.prototype.visitText = function (node, block) {
 
 AsyncCompiler.prototype.visitComment = function (node, block) {
     if (node.buffer) {
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('<!--' + node.val + '-->');
     }
 };
 
 AsyncCompiler.prototype.visitBlockComment = function (node, block) {
     if (node.buffer) {
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('<!--' + node.val);
         this.visit(node.block, block);
+        if (this.prettyPrint) {
+            block.indent(0, true, true);
+        }
         block.raw('-->');
     }
 };
@@ -632,7 +735,7 @@ AsyncCompiler.prototype.attrs = function (attrs, block) {
                 return classEscaping[i] ? runtime.escape(cls) : cls;
             })));
         } else {
-            classes = this.promiseProvider.all(classes) + '.then(function (classes) {';
+            classes = this.promiseProvider.all('[' + classes + ']') + '.then(function (classes) {';
             classes += '    var escaping = ' + JSON.stringify(classEscaping) + ';';
             classes += '    return jade.joinClasses(';
             classes += '        classes.map(jade.joinClasses).map(function (cls, i) {';
@@ -650,7 +753,7 @@ AsyncCompiler.prototype.attrs = function (attrs, block) {
 
 module.exports = AsyncCompiler;
 
-},{"./doctypes":2,"./filters":3,"./runtime":24,"./self-closing":25,"character-parser":47,"constantinople":48,"with":70}],2:[function(_dereq_,module,exports){
+},{"./doctypes":2,"./filters":3,"./runtime":24,"./self-closing":25,"character-parser":47,"constantinople":48,"uglify-js":59}],2:[function(_dereq_,module,exports){
 'use strict';
 
 module.exports = {
@@ -789,7 +892,7 @@ function parse(str, options) {
     var js = compiler.compile();
 
     if (options.debug) {
-        console.error('\nCompiled Function:\n\n\u001b[90m%s\u001b[0m', js.replace(/^/gm, '  '));
+        console.error('\nCompiled Function:\n\n\u001b[90m%s\u001b[0m', js.body.replace(/^/gm, '  '));
     }
 
     return js;
@@ -797,13 +900,13 @@ function parse(str, options) {
 
 exports.compile = function (str, options) {
     var code = parse(String(str), options);
-    return new Function(code.params.join(','), code.body).bind(null, runtime, vow);
+    return new Function(code.params.join(','), code.body).bind(null, runtime);
 };
 
 exports.compileFile = function (fileName, options) {
     var src = fs.readFileSync(fileName, 'utf-8');
     options.filename = fileName;
-    return exports.compile(src);
+    return exports.compile(src, options);
 };
 
 exports.render = function (src, data, stream, options) {
@@ -3210,6 +3313,10 @@ Parser.prototype = {
 },{"./filters":3,"./lexer":6,"./nodes":16,"./utils":26,"character-parser":47,"constantinople":48,"fs":27,"path":43}],24:[function(_dereq_,module,exports){
 'use strict';
 
+var vow = _dereq_('vow');
+
+exports.vow = vow;
+
 /**
  * Merge two attribute objects giving precedence
  * to values in object `b`. Classes are special-cased
@@ -3352,6 +3459,57 @@ exports.attrs = function attrs(obj, terse){
   return buf.join('');
 };
 
+function isArray(value) {
+    return Object.prototype.toString.call(value) === "[object Array]";
+}
+
+exports.$each = function (itemFn, altFn) {
+    return function (items) {
+        var i, len, result = [], count = 0;
+        if (isArray(items)) {
+            for (i = 0, len = items.length; i < len; ++i) {
+                result.push(itemFn(items[i], i));
+                count++;
+            }
+        } else {
+            for (i in items) {
+                if (Object.prototype.hasOwnProperty.call(items, i)) {
+                    result.push(itemFn(items[i], i));
+                    count++;
+                }
+            }
+        }
+        if (count === 0 && typeof altFn === 'function') {
+            result.push(altFn());
+        }
+        return result;
+    };
+};
+
+exports.createWriter = function(buff, write) {
+    return function output(items, i) {
+        if (i < items.length) {
+            var item = items[i];
+            if (isArray(item)) {
+                return output(item, 0).then(function () {
+                    return output(items, i + 1);
+                });
+            } else if(vow.isPromise(item)) {
+                return item.then(function (resolved) {
+                    items[i] = resolved;
+                    return output(items, i);
+                });
+            } else {
+                if (item != null) {
+                    write(item);
+                }
+                return output(items, i + 1);
+            }
+        }
+        return vow.fulfill(buff.join(""));
+    };
+};
+
 /**
  * Escape the given string of `html`.
  *
@@ -3412,7 +3570,7 @@ exports.rethrow = function rethrow(err, filename, lineno, str){
   throw err;
 };
 
-},{"fs":27}],25:[function(_dereq_,module,exports){
+},{"fs":27,"vow":69}],25:[function(_dereq_,module,exports){
 'use strict';
 
 // source: http://www.w3.org/html/wg/drafts/html/master/syntax.html#void-elements
@@ -22150,119 +22308,6 @@ defineAsGlobal && (global.Vow = Vow);
 })(this);
 
 }).call(this,_dereq_("FWaASH"))
-},{"FWaASH":44}],70:[function(_dereq_,module,exports){
-'use strict';
-
-var uglify = _dereq_('uglify-js')
-
-module.exports = addWith
-
-/**
- * Mimic `with` as far as possible but at compile time
- *
- * @param {String} obj The object part of a with expression
- * @param {String} src The body of the with expression
- * @param {Array.<String>} exclude A list of variable names to explicitly exclude
- */
-function addWith(obj, src, exclude) {
-  obj = obj + ''
-  src = src + ''
-  exclude = exclude || []
-  exclude = exclude.concat(detect(obj))
-  var vars = detect(src)
-    .filter(function (v) {
-      return exclude.indexOf(v) === -1
-    })
-
-  if (vars.length === 0) return src
-
-  var declareLocal = ''
-  var local = 'locals_for_with'
-  var result = 'result_of_with'
-  if (/^[a-zA-Z0-9$_]+$/.test(obj)) {
-    local = obj
-  } else {
-    while (vars.indexOf(local) != -1 || exclude.indexOf(local) != -1) {
-      local += '_'
-    }
-    declareLocal = 'var ' + local + ' = (' + obj + ')'
-  }
-  while (vars.indexOf(result) != -1 || exclude.indexOf(result) != -1) {
-    result += '_'
-  }
-
-  var inputVars = vars.map(function (v) {
-    return JSON.stringify(v) + ' in ' + local + '?' +
-      local + '.' + v + ':' +
-      'typeof ' + v + '!=="undefined"?' + v + ':undefined'
-  })
-
-  src = '(function (' + vars.join(', ') + ') {' +
-    src +
-    '}(' + inputVars.join(',') + '))'
-
-  return ';' + declareLocal + ';' + unwrapReturns(src, result) + ';'
-}
-
-/**
- * Detect, and return a list of, any global variables in a function
- *
- * @param {String} src Some JavaScript code
- */
-function detect(src) {
-    var ast = uglify.parse('(function () {' + src + '}())') // allow return keyword
-    ast.figure_out_scope()
-    var globals = ast.globals
-        .map(function (node, name) {
-            return name
-        })
-    return globals
-}
-
-/**
- * Take a self calling function, and unwrap it such that return inside the function
- * results in return outside the function
- *
- * @param {String} src    Some JavaScript code representing a self-calling function
- * @param {String} result A temporary variable to store the result in
- */
-function unwrapReturns(src, result) {
-  var originalSource = src
-  var hasReturn = false
-  var ast = uglify.parse(src)
-  src = src.split('')
-
-  if (ast.body.length !== 1 || ast.body[0].TYPE !== 'SimpleStatement' ||
-      ast.body[0].body.TYPE !== 'Call' || ast.body[0].body.expression.TYPE !== 'Function')
-    throw new Error('AST does not seem to represent a self-calling function')
-  var fn = ast.body[0].body.expression
-
-  var walker = new uglify.TreeWalker(visitor)
-  function visitor(node, descend) {
-    if (node !== fn && (node.TYPE === 'Defun' || node.TYPE === 'Function')) {
-      return true //don't descend into functions
-    }
-    if (node.TYPE === 'Return') {
-      descend()
-      hasReturn = true
-      replace(node, 'return {value: ' + source(node.value) + '};')
-      return true //don't descend again
-    }
-  }
-  function source(node) {
-    return src.slice(node.start.pos, node.end.endpos).join('')
-  }
-  function replace(node, str) {
-    for (var i = node.start.pos; i < node.end.endpos; i++) {
-      src[i] = ''
-    }
-    src[node.start.pos] = str
-  }
-  ast.walk(walker)
-  if (!hasReturn) return originalSource
-  else return 'var ' + result + '=' + src.join('') + ';if (' + result + ') return ' + result + '.value'
-}
-
-},{"uglify-js":59}]},{},[5])
+},{"FWaASH":44}]},{},[5])
 (5)
 });
