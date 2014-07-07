@@ -1,7 +1,7 @@
 {
   "name": "jade-async",
   "description": "Jade template engine with asynchronous support",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Stanislav Yashenkov <vampire@realtymag.ru>",
   "license": "MIT",
   "repository": "git://github.com/nyakto/jade-async",
@@ -18,7 +18,8 @@
     "with": "~3.0.0",
     "constantinople": "~2.0.0",
     "vow": "~0.3.13",
-    "vow-fs": "~0.3.2"
+    "vow-fs": "~0.3.2",
+    "uglify-js": "*"
   },
   "devDependencies": {
     "coffee-script": "*",
@@ -28,7 +29,6 @@
     "stylus": "*",
     "should": "*",
     "less": "*",
-    "uglify-js": "*",
     "browserify": "*",
     "linify": "*"
   },
