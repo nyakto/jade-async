@@ -14,7 +14,7 @@ html
 	body
 		h1= getGreeting('world')
 		ul
-			each item in getItems
+			each item in getItems()
 				li= item
 ```
 
