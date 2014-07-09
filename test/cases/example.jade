@@ -1,0 +1,9 @@
+doctype html
+html
+	head
+		title jade-async
+	body
+		h1= getGreeting('world')
+		ul
+			each item in getItems()
+				li= item
