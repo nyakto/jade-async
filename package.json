@@ -29,7 +29,8 @@
     "should": "*",
     "less": "*",
     "browserify": "*",
-    "linify": "*"
+    "linify": "*",
+    "vow": "~0.3.13"
   },
   "component": {
     "scripts": {

@@ -6,7 +6,6 @@
 var fs = require('fs');
 var assert = require('assert');
 var jade = require('../');
-var uglify = require('uglify-js');
 
 jade.filters['custom-filter'] = function (str, options) {
   assert(str === 'foo bar');
@@ -33,11 +32,22 @@ cases.forEach(function(test){
   var name = test.replace(/[-.]/g, ' ');
   it(name, function(done) {
     var path = 'test/cases/' + test + '.jade';
-    var str = fs.readFileSync(path, 'utf8');
     var html = fs.readFileSync('test/cases/' + test + '.html', 'utf8').trim().replace(/\r/g, '');
-    var fn = jade.compile(str, { filename: path, pretty: true, basedir: 'test/cases' });
+    var dataSource = null;
+    if (fs.existsSync('test/cases/' + test + '.js')) {
+        dataSource = './cases/' + test + '.js';
+    } else if (fs.existsSync('test/cases/' + test + '.json')) {
+        dataSource = './cases/' + test + '.json';
+    }
+    var data = {
+        title: 'Jade'
+    };
+    if (dataSource) {
+        data = require(dataSource);
+    }
+    var fn = jade.compileFile(path, { filename: path, pretty: true, basedir: 'test/cases' });
 
-    fn({ title: 'Jade' }).done(function (actual) {
+    fn(data).done(function (actual) {
         if (/filter/.test(test)) {
             actual = actual.replace(/\n| /g, '');
             html = html.replace(/\n| /g, '');
