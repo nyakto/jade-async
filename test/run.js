@@ -32,7 +32,6 @@ cases.forEach(function(test){
   var name = test.replace(/[-.]/g, ' ');
   it(name, function(done) {
     var path = 'test/cases/' + test + '.jade';
-    var str = fs.readFileSync(path, 'utf8');
     var html = fs.readFileSync('test/cases/' + test + '.html', 'utf8').trim().replace(/\r/g, '');
     var dataSource = null;
     if (fs.existsSync('test/cases/' + test + '.js')) {
@@ -46,7 +45,7 @@ cases.forEach(function(test){
     if (dataSource) {
         data = require(dataSource);
     }
-    var fn = jade.compile(str, { filename: path, pretty: true, basedir: 'test/cases' });
+    var fn = jade.compileFile(path, { filename: path, pretty: true, basedir: 'test/cases' });
 
     fn(data).done(function (actual) {
         if (/filter/.test(test)) {
