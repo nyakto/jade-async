@@ -1,0 +1,12 @@
+mixin bar(item)
+	block
+	div= item
+
+mixin foo
+	- var list = [1, 2, 3]
+	- var prefix = 'prefix-'
+	each item in list
+		+bar(item)
+			div= prefix + item
+
++foo
