@@ -17,7 +17,7 @@
     "monocle": "1.1.51",
     "with": "~3.0.0",
     "constantinople": "~2.0.0",
-    "uglify-js": "*",
+    "uglify-js": "~2.7.3",
     "promise": "~5.0.0"
   },
   "devDependencies": {
